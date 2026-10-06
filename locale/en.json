@@ -1,0 +1,28 @@
+{
+  "meta": {
+    "title": "Session monitor",
+    "description": "A lightweight session-status HUD: live session list with color-coded states, system notifications when a session finishes or needs you, an optional always-on-top detached window, and one-click jump to a session's conversation."
+  },
+  "panel.title": "Sessions",
+  "panel.count": "{n} sessions",
+  "panel.collapse": "Collapse",
+  "panel.expand": "Expand",
+  "panel.detach": "Detach",
+  "panel.attach": "Recall",
+  "panel.notifyOn": "System notifications: on",
+  "panel.notifyOff": "System notifications: off",
+  "panel.empty": "No sessions",
+  "state.running": "Running",
+  "state.attention": "Needs you",
+  "state.done": "Done",
+  "state.idle": "Idle",
+  "state.blank": "New",
+  "pip.title": "DSH Sessions",
+  "pip.hint": "Click a session to open · always on top",
+  "pip.recall": "Recall",
+  "toast.detachUnsupported": "This environment cannot detach the window; using the in-app panel",
+  "toast.detachFailed": "Could not open the detached window",
+  "notify.title": "DSH Session monitor",
+  "notify.done": "Session “{title}” finished",
+  "notify.attention": "Session “{title}” needs you"
+}

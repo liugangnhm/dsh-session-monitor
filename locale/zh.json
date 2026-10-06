@@ -1,0 +1,28 @@
+{
+  "meta": {
+    "title": "会话监控",
+    "description": "轻量会话状态悬浮面板：实时列出各会话并以颜色区分状态，必要时系统通知，可外置为不随 DSH 最小化的置顶小窗，点击行跳转对应会话。"
+  },
+  "panel.title": "会话监控",
+  "panel.count": "{n} 个会话",
+  "panel.collapse": "收起",
+  "panel.expand": "展开",
+  "panel.detach": "外置",
+  "panel.attach": "收回",
+  "panel.notifyOn": "系统通知：开",
+  "panel.notifyOff": "系统通知：关",
+  "panel.empty": "暂无会话",
+  "state.running": "运行中",
+  "state.attention": "待处理",
+  "state.done": "已完成",
+  "state.idle": "空闲",
+  "state.blank": "新会话",
+  "pip.title": "DSH 会话监控",
+  "pip.hint": "点击会话跳转 · 窗口始终置顶",
+  "pip.recall": "收回",
+  "toast.detachUnsupported": "当前环境不支持外置窗口，请使用应用内面板",
+  "toast.detachFailed": "外置窗口打开失败",
+  "notify.title": "DSH 会话监控",
+  "notify.done": "会话「{title}」已完成",
+  "notify.attention": "会话「{title}」等待你处理"
+}

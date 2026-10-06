@@ -1,0 +1,12 @@
+# dsh-session-monitor bundle patch: one host row over the Web or Desktop
+# profile. The row name resolves from the profile's own node_modules where
+# `dsh plugin --profile <profile> add <path>` installed this package.
+#
+# The host half is a pure UI carrier (an empty `apply`), exactly like the
+# shipped `@deepseek-ai/dsh-client-ui-open-in-app`: its only job is to put a
+# Loader entry in the tree so the browser half, discovered through this
+# package's `dsh.client` declaration and served from `exports["./client"]`,
+# reaches the page.
+- insert:
+    - id: session-monitor
+      name: dsh-session-monitor

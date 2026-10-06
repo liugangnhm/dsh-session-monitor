@@ -1,0 +1,8 @@
+# dependencies are not vendored; the host composition provides every
+# @deepseek-ai/* module the client half requires at runtime
+node_modules/
+
+# local scratch
+*.log
+.DS_Store
+.dsh-write-probe.tmp
