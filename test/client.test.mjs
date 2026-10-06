@@ -273,12 +273,66 @@ const buttons = collect(panel, "sm-btn", []);
 const detachButton = buttons.find((node) => node.children[0] === "panel.detach");
 check("the panel offers a detach button", detachButton !== undefined);
 detachButton.props.onClick();
+await new Promise((resolve) => setTimeout(resolve, 20));
 panel = renderPanel();
 const toasts = collectByType(panel, "Toast", []);
 check(
 	"detach without any window path raises the failure notice with its reason",
 	toasts.length === 1 && toasts[0].props.text.startsWith("toast.detachFailed") && toasts[0].props.text.includes("window.open unavailable"),
 );
+
+// --- native window path ---------------------------------------------------------
+
+const nativeWindowCalls = [];
+const nativeStateCalls = [];
+let nativePending = [];
+const realFetch = globalThis.fetch;
+globalThis.fetch = (url, options) => {
+	const target = String(url);
+	const body = options && options.body ? JSON.parse(options.body) : {};
+	if (target.endsWith("/dsh-session-monitor/window")) {
+		nativeWindowCalls.push(body);
+		return Promise.resolve({ json: () => Promise.resolve({ ok: true, open: true }) });
+	}
+	if (target.endsWith("/dsh-session-monitor/state")) {
+		nativeStateCalls.push(body);
+		return Promise.resolve({ json: () => Promise.resolve({ ok: true }) });
+	}
+	if (target.endsWith("/dsh-session-monitor/pending")) {
+		return Promise.resolve({ json: () => Promise.resolve({ ok: true, items: nativePending }) });
+	}
+	if (target.endsWith("/dsh-session-monitor/consume")) {
+		nativePending = [];
+		return Promise.resolve({ json: () => Promise.resolve({ ok: true }) });
+	}
+	return Promise.reject(new Error("unexpected fetch " + target));
+};
+
+// The host half answers ok: the native window opens and the panel flips to 收回.
+detachButton.props.onClick();
+await new Promise((resolve) => setTimeout(resolve, 20));
+check("the host is asked to open the native window once", nativeWindowCalls.length === 1 && nativeWindowCalls[0].action === "open");
+check("the snapshot rides along with the open request", Array.isArray(nativeWindowCalls[0].state?.rows));
+check("the snapshot is also pushed into the window", nativeStateCalls.length >= 1);
+panel = renderPanel();
+const recallButton = collect(panel, "sm-btn", []).find((node) => node.children[0] === "panel.attach");
+check("the panel reports the native window as detached", recallButton !== undefined);
+const nativeToast = collectByType(panel, "Toast", []).find((node) => node.props.text === "toast.detachNative");
+check("the native window is announced as always-on-top", nativeToast !== undefined);
+
+// A row click inside the window reaches the app through the open-request queue.
+nativePending = ["s-running"];
+await new Promise((resolve) => setTimeout(resolve, 900));
+check("a row click in the native window opens that session", openSessionCalls.includes("s-running"));
+check("the handled request is consumed", nativePending.length === 0);
+
+// 收回 closes it and stops the drain.
+recallButton.props.onClick();
+await new Promise((resolve) => setTimeout(resolve, 20));
+check("recall closes the native window", nativeWindowCalls.length === 2 && nativeWindowCalls[1].action === "close");
+panel = renderPanel();
+check("the panel returns to the detach button", collect(panel, "sm-btn", []).some((node) => node.children[0] === "panel.detach"));
+globalThis.fetch = realFetch;
 
 // --- notifications ------------------------------------------------------------
 
