@@ -42,6 +42,7 @@ globalThis.window = {
 			registration = value;
 		},
 	},
+	location: { origin: "http://127.0.0.1:19387" },
 	localStorage: {
 		getItem: () => null,
 		setItem: () => {},
