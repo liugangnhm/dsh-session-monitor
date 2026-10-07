@@ -54,7 +54,10 @@ function Send([string]$Kind, $Extra) {
 $zh = @{
   Title = "DSH 会话监控"
   Empty = "暂无活跃会话"
+  EmptyAll = "暂无会话"
   Hint = "点击会话跳转 · 窗口始终置顶"
+  # The label states the view that is ON, and the count makes the switch
+  # verifiable: "活跃 1/215" is a fact the user can check at a glance.
   FilterActive = "活跃"
   FilterAll = "全部"
   NotifyOn = "通知开"
@@ -64,6 +67,7 @@ $zh = @{
 $en = @{
   Title = "DSH Sessions"
   Empty = "No active sessions"
+  EmptyAll = "No sessions"
   Hint = "Click a session to open · always on top"
   FilterActive = "Active"
   FilterAll = "All"
@@ -154,6 +158,25 @@ function Send-Command([string]$Action) {
 
 # >>> testable
 <#
+  Paint one header toggle.
+
+  On and off must be distinguishable at a glance - a subtle text change is not
+  enough for a user asking "did the notification button work?": the on state
+  gets a filled background plus bright text, the off state goes muted.
+#>
+function Set-ToggleLook($Button, [bool]$On) {
+  if ($On) {
+    $Button.Background = $brush.ConvertFromString("#FF2A3A2C")
+    $Button.BorderBrush = $brush.ConvertFromString("#FF81C995")
+    $Button.Foreground = $brush.ConvertFromString("#FF81C995")
+  } else {
+    $Button.Background = [System.Windows.Media.Brushes]::Transparent
+    $Button.BorderBrush = $brush.ConvertFromString("#FF5F6368")
+    $Button.Foreground = $brush.ConvertFromString("#FF9AA0A6")
+  }
+}
+
+<#
   Build one session row. Kept between the testable markers so the row check can
   exercise it directly: every display state must render, because a throw here is
   swallowed by the poll's own catch and shows up as an empty window.
@@ -234,29 +257,36 @@ function Update-List {
     $script:failures = 0
     $data = $response.Content | ConvertFrom-Json
 
-    # The buttons reflect the browser half's settings, so they update on every
-    # poll - even when the rows themselves did not change.
+    # The buttons mirror the browser half's settings and are repainted on EVERY
+    # poll, not only when the value changes: a button that updates conditionally
+    # gives no feedback at all when its state already matches, which reads as
+    # "the button does nothing".
     $showAll = ($data.showAll -eq $true)
-    if ($showAll -ne $script:showAll) {
-      $script:showAll = $showAll
-      $filterButton.Content = if ($showAll) { $L.FilterAll } else { $L.FilterActive }
-    }
+    $script:showAll = $showAll
+    $filterButton.Content = if ($showAll) { $L.FilterAll } else { $L.FilterActive }
+    Set-ToggleLook -Button $filterButton -On $showAll
+
     $notifyOn = ($data.notifyOn -ne $false)
-    if ($notifyOn -ne $script:notifyOn) {
-      $script:notifyOn = $notifyOn
-      $notifyButton.Content = if ($notifyOn) { $L.NotifyOn } else { $L.NotifyOff }
-      $notifyButton.Foreground = $brush.ConvertFromString($(if ($notifyOn) { "#FF81C995" } else { "#FF9AA0A6" }))
-    }
+    $script:notifyOn = $notifyOn
+    $notifyButton.Content = if ($notifyOn) { $L.NotifyOn } else { $L.NotifyOff }
+    Set-ToggleLook -Button $notifyButton -On $notifyOn
 
     $rows = @()
     if ($data.rows) { $rows = @($data.rows) }
+    $total = if ($data.totalCount) { [int]$data.totalCount } else { $rows.Count }
+
+    # The hint carries the counts, so the filter's effect is verifiable without
+    # counting rows by eye: the browser half pushes the filtered rows and the
+    # unfiltered total together.
+    $hintText.Text = $L.Hint + "  ·  " + $rows.Count + "/" + $total
+
     $signature = (($rows | ForEach-Object { [string]$_.id + ":" + [string]$_.state }) -join "|")
     if ($signature -eq $script:signature) { return }
     $script:signature = $signature
     $list.Children.Clear()
     if ($rows.Count -eq 0) {
       $empty = New-Object System.Windows.Controls.TextBlock
-      $empty.Text = $L.Empty
+      $empty.Text = if ($showAll) { $L.EmptyAll } else { $L.Empty }
       $empty.Foreground = $brush.ConvertFromString("#FF9AA0A6")
       $empty.HorizontalAlignment = "Center"
       $empty.Margin = New-Object System.Windows.Thickness 0, 16, 0, 0

@@ -1,4 +1,11 @@
-/** One-shot state server for the WPF window smoke test. */
+/**
+ * One-shot state server for the WPF window smoke test.
+ *
+ * It mirrors the real payload, including the two settings the header buttons
+ * read (`showAll`, `notifyOn`) and `totalCount` for the hint's counter. The
+ * charset is explicit: PowerShell 5.1 decodes a charset-less body as Latin-1,
+ * which is what turned Chinese session titles into mojibake.
+ */
 import { createServer } from "node:http";
 
 const state = {
@@ -11,13 +18,14 @@ const state = {
 		{ id: "smoke-4", title: "空闲的会话", state: "idle", blank: false, updatedAt: 4 },
 	],
 	runningCount: 2,
-	totalCount: 4,
-	showAll: true,
+	totalCount: 9,
+	showAll: false,
+	notifyOn: true,
 };
 
 const server = createServer((request, response) => {
 	if (request.method === "GET" && request.url.startsWith("/dsh-session-monitor/state")) {
-		response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+		response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
 		response.end(JSON.stringify(state));
 		return;
 	}

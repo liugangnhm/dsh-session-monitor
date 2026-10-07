@@ -45,6 +45,18 @@ check("window.ps1 handles row clicks with a bubbled event", /Add_MouseUp/.test(t
 check("window.ps1 captures the clicked row's id", /GetNewClosure\(\)/.test(text));
 check("window.ps1 keeps the running pulse on a Storyboard", /RepeatBehavior\]::Forever/.test(text));
 check("window.ps1 reports ready, commands and its own close", /Send "ready"/.test(text) && /Send "command"/.test(text) && /Send "closed"/.test(text));
+// The header toggles must repaint on EVERY poll and show their state. A button
+// that only updates when its value changed gives no feedback at all when the
+// state already matches, which the user reads as "the button does nothing".
+check(
+	"the header toggles repaint on every poll",
+	/Set-ToggleLook -Button \$filterButton/.test(text) && !/\$showAll -ne \$script:showAll/.test(text),
+);
+check(
+	"a toggle's on state is visually distinct, not just different text",
+	/function Set-ToggleLook/.test(text) && /Background = \$brush\.ConvertFromString/.test(text),
+);
+check("the hint carries the visible/total counts", /\$rows\.Count \+ "\/" \+ \$total/.test(text));
 
 // Parse with the interpreter that actually runs it.
 const parsed = spawnSync(
