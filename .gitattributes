@@ -1,0 +1,7 @@
+# The window script is load-bearing text, not a source file to normalise:
+# Windows PowerShell 5.1 reads a BOM-less .ps1 as ANSI and turns every Chinese
+# label into mojibake. Never let a checkout or a diff tool rewrite it.
+lib/window.ps1 -text -whitespace=nowarn
+
+# Everything else is plain LF text.
+* text=auto eol=lf

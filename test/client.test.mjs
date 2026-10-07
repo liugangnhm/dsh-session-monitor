@@ -158,10 +158,28 @@ const ctx = {
 	on: () => () => {},
 };
 
-/** Render the registered panel with a stub framework seat. */
+/** The overlay registration (the in-app card); the sidebar toggle is [1]. */
+function overlayEntry() {
+	return registrations.find((entry) => entry.descriptor.name === "shell.overlay");
+}
+
+/** The sidebar toggle registration. */
+function sidebarEntry() {
+	return registrations.find((entry) => entry.descriptor.name === "sidebar.footer.action");
+}
+
+/**
+ * Render the registered panel with a stub framework seat.
+ *
+ * The card starts hidden by default, so this opens it the way a user would —
+ * through the sidebar toggle's context menu — then renders the overlay.
+ */
 function renderPanel() {
-	const registrationEntry = registrations[0];
-	return registrationEntry.component({ t: (key) => key });
+	if (overlayEntry().component({ t: (key) => key }) === null) {
+		const toggle = sidebarEntry().component({ t: (key) => key });
+		toggle.props.onContextMenu({ preventDefault: () => {} });
+	}
+	return overlayEntry().component({ t: (key) => key });
 }
 
 /** Collect the row buttons: className exactly `sm-row` (plus optional ` blank`). */
@@ -205,8 +223,30 @@ function collectByType(node, type, found = []) {
 exports.apply(ctx);
 
 check("dictionaries registered under the plugin namespace", dictionaries.some((entry) => entry.ns === "session-monitor" && entry.dicts.zh && entry.dicts.en));
-check("panel registered into shell.overlay", injectedSlots.includes("shell.overlay") && registrations.length === 1);
-check("overlay descriptor carries the locale seat", registrations[0]?.descriptor?.id === "session-monitor" && registrations[0]?.descriptor?.locale === "session-monitor");
+check("panel registered into shell.overlay", injectedSlots.includes("shell.overlay"));
+check(
+	"a sidebar toggle gives the hidden panel a permanent entry point",
+	injectedSlots.includes("sidebar.footer.action"),
+);
+check("both registrations carry the locale seat", registrations.length === 2 && registrations.every((entry) => entry.descriptor?.id === "session-monitor" && entry.descriptor?.locale === "session-monitor"));
+
+// --- the panel starts hidden ---------------------------------------------------
+
+// The detached window is the product; the in-app card is the fallback the user
+// opts into. This is the default the plugin ships with.
+check(
+	"the in-app panel renders nothing until it is asked for",
+	overlayEntry().component({ t: (key) => key }) === null,
+);
+// ... and the sidebar row is how it is asked for, since a hidden panel with no
+// affordance would be unreachable.
+const sidebarToggle = sidebarEntry().component({ t: (key) => key });
+check("the sidebar toggle renders", sidebarToggle !== null);
+sidebarToggle.props.onContextMenu({ preventDefault: () => {} });
+check(
+	"the sidebar toggle's context menu shows the panel",
+	overlayEntry().component({ t: (key) => key }) !== null,
+);
 
 // --- rows, states and navigation ---------------------------------------------
 
