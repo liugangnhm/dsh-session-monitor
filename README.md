@@ -74,12 +74,16 @@ dsh plugin --profile desktop add "github:liugangnhm/dsh-session-monitor#main"
 ## 开发自测
 
 ```bash
-node test/client.test.mjs       # 浏览器半边离线断言
-node test/window-smoke.mjs      # 外置窗脚本：5.1 解析检查（--run 真弹窗 4 秒）
+node test/client.test.mjs        # 浏览器半边离线断言
+node test/window-origin.test.mjs # 外置窗要轮询的 origin 推导（含 "null" 回归）
+node test/row-check.mjs          # 外置窗行构建：五种状态各渲染一行
+node test/window-smoke.mjs       # 外置窗脚本 5.1 解析（--run 真弹窗并验 READY 握手）
 ```
 
-- `client.test.mjs`：在 Node 里以与 `@deepseek-ai/dsh-client-modules` 相同的方式载入 `lib/client.js`（捕获 `window.__ModuleLoader__.load` 注册、桩 React/原语/ctx），断言：注册位置与字典、行状态映射与排序、活跃/全部过滤、点击跳转调用、外置全失败时的诊断 toast、host 原生窗口的打开/快照推送/打开队列消费/收回，以及离开时的通知触发。
-- `window-smoke.mjs`：按 host 的方式抽取 `WINDOW_SCRIPT` 并做占位符替换 + BOM，用 PowerShell 语言解析器校验语法（无 BOM 时 5.1 会按 ANSI 读乱码——这个坑有回归测试守着）；`--run` 会真的把窗口拉起来 4 秒（屏幕上会闪一下）。
+- `client.test.mjs`：在 Node 里以与 `@deepseek-ai/dsh-client-modules` 相同的方式载入 `lib/client.js`（捕获 `window.__ModuleLoader__.load` 注册、桩 React/原语/ctx），断言注册位置与字典、行状态映射与排序、活跃/全部过滤、点击跳转、外置全失败时的诊断 toast、host 窗口的打开/快照推送/队列消费/收回，以及离开时的通知触发。
+- `window-origin.test.mjs`：从源码抽取 `resolveWindowOrigin` 求值，锁住「沙箱帧报 `null` 时必须回退到请求 Host 头」这条——不然窗口会去拉 `null/...`，十次失败后被孤儿守卫关掉。
+- `row-check.mjs`：抽取 `New-Row` 并跑 running/attention/done/idle/未知 五态。它守的是一个真实事故：`RepeatMode` 在 PowerShell 里设不了，running 行一抛异常就被 `Update-List` 的 catch 吞掉，表现为「窗口空白 + 几秒后自闭」且哪里都不报错。
+- `window-smoke.mjs`：抽取 `WINDOW_SCRIPT` 做占位符替换 + BOM，用 PowerShell 解析器校验语法（无 BOM 时 5.1 按 ANSI 读乱码）；`--run` 真实起窗并断言 stdout 上的 `ready` 握手——「进程起来了但没窗口」这类谎报靠它拦住。
 
 ## License
 
