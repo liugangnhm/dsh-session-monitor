@@ -74,16 +74,16 @@ dsh plugin --profile desktop add "github:liugangnhm/dsh-session-monitor#main"
 ## 开发自测
 
 ```bash
-node test/client.test.mjs        # 浏览器半边离线断言
-node test/window-origin.test.mjs # 外置窗要轮询的 origin 推导（含 "null" 回归）
-node test/row-check.mjs          # 外置窗行构建：五种状态各渲染一行
-node test/window-smoke.mjs       # 外置窗脚本 5.1 解析（--run 真弹窗并验 READY 握手）
+node test/client.test.mjs         # 浏览器半边离线断言
+node test/host-check.mjs          # host 半边：路由、拒绝路径（--run 真开窗并验进程）
+node test/window-check.mjs        # 外置窗脚本：BOM、5.1 解析、五态渲染、点击带 id（--run 验 READY 握手）
+node test/window-origin.test.mjs  # 外置窗轮询地址推导（含沙箱帧 "null" 回归）
 ```
 
-- `client.test.mjs`：在 Node 里以与 `@deepseek-ai/dsh-client-modules` 相同的方式载入 `lib/client.js`（捕获 `window.__ModuleLoader__.load` 注册、桩 React/原语/ctx），断言注册位置与字典、行状态映射与排序、活跃/全部过滤、点击跳转、外置全失败时的诊断 toast、host 窗口的打开/快照推送/队列消费/收回，以及离开时的通知触发。
-- `window-origin.test.mjs`：从源码抽取 `resolveWindowOrigin` 求值，锁住「沙箱帧报 `null` 时必须回退到请求 Host 头」这条——不然窗口会去拉 `null/...`，十次失败后被孤儿守卫关掉。
-- `row-check.mjs`：抽取 `New-Row` 并跑 running/attention/done/idle/未知 五态。它守的是一个真实事故：`RepeatMode` 在 PowerShell 里设不了，running 行一抛异常就被 `Update-List` 的 catch 吞掉，表现为「窗口空白 + 几秒后自闭」且哪里都不报错。
-- `window-smoke.mjs`：抽取 `WINDOW_SCRIPT` 做占位符替换 + BOM，用 PowerShell 解析器校验语法（无 BOM 时 5.1 按 ANSI 读乱码）；`--run` 真实起窗并断言 stdout 上的 `ready` 握手——「进程起来了但没窗口」这类谎报靠它拦住。
+- `client.test.mjs`：以与 `@deepseek-ai/dsh-client-modules` 相同的方式载入 `lib/client.js`（捕获 `window.__ModuleLoader__.load`、桩 React/原语/ctx），断言注册位置与字典、行状态映射与排序、活跃/全部过滤、点击跳转、面板默认隐藏与侧边栏入口、外置失败诊断 toast、快照推送与队列消费，以及离开时的通知触发。
+- `host-check.mjs`：用桩 Cordis 上下文驱动真实 `apply()`，断言七条路由注册、非回环调用被拒、错误方法/畸形请求体返回 4xx，并守住一条真实事故——`windowWorkDirectory()` 把变量当函数调，导致每次开窗都 400、窗口永不出现（`--run` 时真开窗并核对进程存在）。host 半边此前完全没有测试，这个缺口正是那个 bug 溜过去的原因。
+- `window-check.mjs`：直接读 `lib/window.ps1`（脚本已独立成文件，不再从 JS 里抠字符串）。守住三件事：**BOM 必须存在**（5.1 按 ANSI 读无 BOM 的 .ps1，中文全乱码）、五种状态都能构建行（`RepeatMode` 在 PowerShell 里设不了，曾让 running 行抛异常被 catch 吞掉 → 空白窗 + 自闭）、以及点击落在子元素上仍能把 id 带上（`MouseLeftButtonUp` 是直接路由事件，不冒泡）。
+- `window-origin.test.mjs`：锁住「沙箱帧报 `null` 时必须回退到请求 Host 头」——不然窗口会去拉 `null/...`，十次失败后被孤儿守卫关掉。
 
 ## License
 
