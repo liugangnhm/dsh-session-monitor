@@ -800,7 +800,16 @@ function createPipDocument() {
 				this.children.push(child);
 				return child;
 			},
-			addEventListener: () => {},
+			/** Handlers the code registered, so a test can really fire them. */
+			handlers: {},
+			addEventListener(event, handler) {
+				if (!this.handlers[event]) this.handlers[event] = [];
+				this.handlers[event].push(handler);
+			},
+			/** Invoke the click handlers the way a user's click would. */
+			fireClick() {
+				for (const handler of this.handlers.click || []) handler({ stopPropagation: () => {} });
+			},
 			querySelector(selector) {
 				return this.bySelector(selector);
 			},
@@ -907,6 +916,27 @@ check(
 	String(pipDocument.body.style.background) === panelSurface &&
 		/rgba\(32,\s*33,\s*36,\s*0?\.35\)/.test(String(pipDocument.body.style.background)),
 );
+
+// Clicking a row IN THE DETACHED WINDOW must also restore the app: the focus
+// path has to serve both surfaces, and the detached window is a different
+// renderer with its own click listeners.
+const pipFocusCalls = [];
+globalThis.fetch = (url, options) => {
+	const target = String(url);
+	if (target.endsWith("/dsh-session-monitor/focus")) {
+		pipFocusCalls.push(options && options.body ? JSON.parse(options.body) : {});
+		return Promise.resolve({ json: () => Promise.resolve({ ok: true, action: "restored:foreground" }) });
+	}
+	return Promise.reject(new Error("unexpected fetch " + target));
+};
+// Fire the click listener renderPip attached to the row.
+pipList.children[0].fireClick();
+await new Promise((resolve) => setTimeout(resolve, 20));
+check(
+	"a row click inside the detached window also asks the host to restore the app",
+	pipFocusCalls.length === 1,
+);
+globalThis.fetch = realFetch;
 globalThis.window.documentPictureInPicture = undefined;
 storage.delete("sm.opacity");
 
