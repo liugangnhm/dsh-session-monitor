@@ -3,5 +3,9 @@
 # label into mojibake. Never let a checkout or a diff tool rewrite it.
 lib/window.ps1 -text -whitespace=nowarn
 
+# Same for the focus helper: it carries a BOM for the same reason, and its
+# comments are Chinese.
+lib/focus.ps1 -text -whitespace=nowarn
+
 # Everything else is plain LF text.
 * text=auto eol=lf
