@@ -776,6 +776,140 @@ check(
 );
 storage.delete("sm.collapsedParents");
 
+// --- the detached PiP window ----------------------------------------------------
+//
+// The Document-PiP path is a different renderer (raw DOM in another document,
+// not React), so it can silently drift from the panel: the panel can gain
+// opacity and child rows while the PiP window keeps drawing a flat opaque list.
+// This drives the real buildPip/renderPip code against a minimal document stub.
+
+/** A tiny DOM stub just rich enough for buildPip and renderPip. */
+function createPipDocument() {
+	const makeElement = (tag) => {
+		const element = {
+			tagName: tag,
+			className: "",
+			textContent: "",
+			innerHTML: "",
+			title: "",
+			type: "",
+			style: {},
+			children: [],
+			classList: { toggle: () => {}, add: () => {}, remove: () => {} },
+			appendChild(child) {
+				this.children.push(child);
+				return child;
+			},
+			addEventListener: () => {},
+			querySelector(selector) {
+				return this.bySelector(selector);
+			},
+			bySelector(selector) {
+				const wanted = selector.replace(/^\./, "");
+				for (const child of this.children) {
+					if ((child.className || "").split(/\s+/).includes(wanted)) return child;
+					const nested = child.bySelector ? child.bySelector(selector) : null;
+					if (nested) return nested;
+				}
+				return null;
+			},
+		};
+		return element;
+	};
+	const body = makeElement("body");
+	const head = makeElement("head");
+	const doc = {
+		title: "",
+		body,
+		head,
+		createElement: (tag) => makeElement(tag),
+		querySelector(selector) {
+			return body.bySelector(selector);
+		},
+	};
+	// buildPip assigns body.innerHTML then queries the skeleton, so materialize
+	// the elements it expects.
+	Object.defineProperty(body, "innerHTML", {
+		get() {
+			return "";
+		},
+		set() {
+			body.children = [];
+			for (const [className, tag] of [
+				["sm-pip", "div"],
+				["sm-pip-title", "span"],
+				["sm-pip-filter", "button"],
+				["sm-pip-recall", "button"],
+				["sm-pip-list", "div"],
+				["sm-pip-hint", "div"],
+			]) {
+				const element = makeElement(tag);
+				element.className = className;
+				body.appendChild(element);
+			}
+		},
+	});
+	return doc;
+}
+
+const pipDocument = createPipDocument();
+const pipStub = {
+	document: pipDocument,
+	addEventListener: () => {},
+	close: () => {},
+};
+globalThis.window.documentPictureInPicture = {
+	requestWindow: () => Promise.resolve(pipStub),
+};
+
+// A sub-agent plus a running parent, so the PiP window is exercised on both.
+listState = {
+	ids: ["pip-parent"],
+	byId: {
+		"pip-parent": { id: "pip-parent", displayTitle: "Pip parent", running: true, blank: false, updatedAt: 300 },
+		"pip-parent-kid": { id: "pip-parent-kid", displayTitle: "Pip child", running: false, blank: false, updatedAt: 301, parentId: "pip-parent", origin: "subagent" },
+	},
+	phase: "ready",
+	projectionsBySession: {},
+};
+statusState = new Map([
+	["pip-parent", { running: true, pendingInteraction: undefined, completionUnread: false }],
+	["pip-parent-kid", { running: false, pendingInteraction: undefined, completionUnread: true }],
+]);
+for (const listener of listListeners) listener();
+
+// Set a distinctive alpha through the panel's own control, so the assertion
+// below compares the two surfaces rather than a hardcoded number.
+panel = renderPanel();
+const pipOpacitySlider = collectByClass(panel, "sm-opacity")[0].children[1];
+pipOpacitySlider.props.onChange({ target: { value: "0.35" } });
+
+// Detach through the real button, which now takes the Document-PiP path.
+const pipDetach = collect(panel, "sm-btn", []).find((node) => node.children[0] === "panel.detach");
+pipDetach.props.onClick();
+await new Promise((resolve) => setTimeout(resolve, 20));
+
+const pipList = pipDocument.body.querySelector(".sm-pip-list");
+check("the PiP window received rows", pipList !== null && pipList.children.length >= 2);
+check(
+	"the PiP window renders the parent row",
+	pipList.children.some((child) => child.title === "Pip parent"),
+);
+check(
+	"the PiP window indents the sub-agent row",
+	pipList.children.some((child) => /\bchild\b/.test(child.className || "")),
+);
+// The requirement is that the setting reads the same in both places, so this
+// compares the two surfaces instead of restating the alpha.
+const panelSurface = String(collectByClass(renderPanel(), "sm-root")[0].props.style.background);
+check(
+	"the PiP window applies the same background opacity as the panel",
+	String(pipDocument.body.style.background) === panelSurface &&
+		/rgba\(32,\s*33,\s*36,\s*0?\.35\)/.test(String(pipDocument.body.style.background)),
+);
+globalThis.window.documentPictureInPicture = undefined;
+storage.delete("sm.opacity");
+
 // --- report -------------------------------------------------------------------
 
 if (failures.length > 0) {

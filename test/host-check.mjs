@@ -181,6 +181,68 @@ check(
 	typeof malformed.payload?.error === "string" && !/is not a function/.test(malformed.payload.error),
 );
 
+// --- one press, two transports, one event -------------------------------------
+//
+// lib/window.ps1 reports every interaction on TWO transports (a stdout protocol
+// line and an HTTP POST) so that a broken pipe cannot make a control silently
+// dead. Both land on the host, so the host is where the pair has to collapse
+// back into one event. This is not a nicety: a row click is idempotent, but a
+// TOGGLE applied twice cancels itself out and the control looks broken — which
+// is exactly what happened before the funnel existed (measured: one twisty
+// press queued ["p-1","p-1"]).
+//
+// From the funnel's point of view the two transports are indistinguishable, so
+// two rapid deliveries here model precisely what the real window produces.
+
+/** Read what the browser half would drain. */
+async function pendingState() {
+	const response = await callRoute(routes.get(`${ROUTE}/pending`), { method: "GET" });
+	return response.payload;
+}
+
+/** Deliver one report twice, the way the window's two transports do. */
+async function pressTwice(path, body) {
+	await callRoute(routes.get(path), { body: JSON.stringify(body) });
+	await callRoute(routes.get(path), { body: JSON.stringify(body) });
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 400));
+
+await pressTwice(`${ROUTE}/command`, { action: "toggle-children", id: "h-parent" });
+let pending = await pendingState();
+check(
+	"one twisty press on both transports queues exactly one toggle",
+	Array.isArray(pending.children) && pending.children.length === 1,
+);
+if (pending.children?.length !== 1) console.error("  queued:", JSON.stringify(pending.children));
+await callRoute(routes.get(`${ROUTE}/consume`), { body: JSON.stringify({ children: ["h-parent"] }) });
+check("draining clears the queued toggle", (await pendingState()).children.length === 0);
+
+// A deliberate second press still has to register, or the control would only
+// work once.
+await settle();
+await pressTwice(`${ROUTE}/command`, { action: "toggle-children", id: "h-parent" });
+check("a real second press still registers", (await pendingState()).children.length === 1);
+await callRoute(routes.get(`${ROUTE}/consume`), { body: JSON.stringify({ children: ["h-parent"] }) });
+
+// Two different parents must never mask each other.
+await settle();
+await pressTwice(`${ROUTE}/command`, { action: "toggle-children", id: "h-parent-a" });
+await pressTwice(`${ROUTE}/command`, { action: "toggle-children", id: "h-parent-b" });
+check("different parents are tracked independently", (await pendingState()).children.length === 2);
+await callRoute(routes.get(`${ROUTE}/consume`), { body: JSON.stringify({ children: ["h-parent-a", "h-parent-b"] }) });
+
+// The pre-existing header toggles ride the same funnel.
+await settle();
+await pressTwice(`${ROUTE}/command`, { action: "toggle-filter" });
+check("one filter press on both transports queues exactly one toggle", (await pendingState()).commands.length === 1);
+await callRoute(routes.get(`${ROUTE}/consume`), { body: JSON.stringify({ commands: ["toggle-filter"] }) });
+
+await settle();
+await pressTwice(`${ROUTE}/open`, { id: "h-session" });
+check("one row click on both transports queues exactly one open", (await pendingState()).items.length === 1);
+await callRoute(routes.get(`${ROUTE}/consume`), { body: JSON.stringify({ ids: ["h-session"] }) });
+
 // --- the focus route ----------------------------------------------------------
 
 const foreignFocus = await callRoute(routes.get(`${ROUTE}/focus`), { method: "POST", host: "example.test" });
