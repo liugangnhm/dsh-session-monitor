@@ -182,6 +182,40 @@ if (handle !== "0" && handle !== "") {
 	check("the window is no longer minimized", probe(`[SmE2E]::IsIconic([IntPtr]${handle})`) === "False");
 	if (parsed === null) console.error("    helper said:", report, String(focused.stderr || "").slice(0, 200));
 
+	// --- the tray case --------------------------------------------------------
+	//
+	// DSH hides its window to the system tray instead of minimizing it, which
+	// leaves a window that is NEITHER visible NOR iconic. The first version of
+	// this helper required IsWindowVisible, so it reported "no app window found"
+	// for exactly that state and a second click could never bring the app back —
+	// the bug the user hit. Both halves of that are asserted here: the window is
+	// found while hidden, and it really ends up on screen.
+	probe(`[void][SmE2E]::ShowWindow([IntPtr]${handle}, 0)`);
+	await new Promise((resolve) => setTimeout(resolve, 700));
+	const hiddenState = probe(`[SmE2E]::IsWindowVisible([IntPtr]${handle})`);
+	check("the victim is hidden (not minimized) before the tray request", hiddenState === "False");
+
+	const trayRun = spawnSync(
+		powershell,
+		["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", focusScript, "-TargetPid", String(victim.pid), "-WindowClass", "HwndWrapper"],
+		{ encoding: "utf8" },
+	);
+	const trayReport = String(trayRun.stdout || "").trim().split("\n").pop();
+	let trayParsed = null;
+	try {
+		trayParsed = JSON.parse(trayReport);
+	} catch {}
+	check("a hidden window is still FOUND (not reported as missing)", trayParsed?.ok === true);
+	check("the helper names the tray case", String(trayParsed?.action ?? "").startsWith("unhidden"));
+	check("the helper reports it was hidden", trayParsed?.hidden === true);
+	// The real requirement: it must end up on screen, not merely be reported as such.
+	await new Promise((resolve) => setTimeout(resolve, 400));
+	check(
+		"the tray-hidden window is actually visible again",
+		probe(`[SmE2E]::IsWindowVisible([IntPtr]${handle})`) === "True",
+	);
+	if (trayParsed === null) console.error("    helper said:", trayReport, String(trayRun.stderr || "").slice(0, 200));
+
 	// The route itself must answer JSON (and must be registered) — the browser
 	// half calls it on every row click, so a throw would break navigation.
 	check("the focus route is registered on the real host half", routes.has("/dsh-session-monitor/focus"));

@@ -27,14 +27,14 @@ dsh-session-monitor/
 ├── lib/index.js        # host 半边：PowerShell 置顶窗 + 窗口前置 + 回环控制路由
 ├── lib/client.js       # 浏览器半边：面板（含子 agent 层级与透明度）+ 四级外置回退 + 通知
 ├── lib/window.ps1      # 外置窗程序（WPF：半透明面板、子 agent 缩进、透明度滑杆）
-├── lib/focus.ps1       # 窗口前置：SW_RESTORE + SetForegroundWindow
+├── lib/focus.ps1       # 窗口前置：还原最小化 / 从托盘重新显示 + 置前
 ├── locale/zh.json, en.json
 ├── README.md
 └── test/client.test.mjs        # 浏览器半边离线断言
     test/host-check.mjs         # host 半边：路由与拒绝路径（--run 真开窗/真还原窗口）
     test/window-check.mjs       # 外置窗脚本：BOM / 5.1 解析 / 各态与层级行渲染 / 点击带 id
     test/window-origin.test.mjs # 外置窗轮询地址推导
-    test/focus-e2e.mjs          # 真开一个窗口 → 最小化 → 走 focus.ps1 还原（端到端）
+    test/focus-e2e.mjs          # 真开窗口 → 最小化 / 隐藏到托盘 → 走 focus.ps1 还原（端到端）
     test/smoke-server.mjs       # 冒烟用的假状态服务器
 ```
 
@@ -46,7 +46,14 @@ dsh-session-monitor/
 - **滑杆不会被轮询拽回去**：外置窗每秒轮询一次状态，而「用户拖动 → host → 浏览器半边（最多 0.7s）→ 推回状态」这一圈更慢。若轮询无条件采纳 host 的旧值，用户一松手滑杆就被拉回原位（这正是修掉的那个 bug）。所以窗口用 `Set-LocalOpacity`/`Accepts-RemoteOpacity` 记住自己刚设的值：在 host 追上或超过 4 秒放弃之前，轮询不动滑杆与窗口。两次实测对比：无该守卫时滑杆在 6 次轮询后回到 `1`，有守卫时稳定停在 `0.35`。
 - **外置窗**：浏览器半边在桌面壳的沙箱 iframe 里，Document PiP 报 `Internal error: no window`、`window.open` 被拦；Host 又只是 Electron 主进程的 node 子进程（`require('electron')` 解析不到）。所以桌面版由 host 半边 `child_process.spawn` 一个 **PowerShell WPF 置顶窗**（frameless、`Topmost`、`AllowsTransparency` 半透明面板、可拖动可缩放、× 关闭；脚本写入时带 UTF-8 BOM，5.1 才不乱码）。通信走回环 HTTP 路由：浏览器半边推送会话快照（`POST /dsh-session-monitor/state`），窗口每秒轮询读取（`GET`），行点击 POST 到 `/dsh-session-monitor/open` 进入队列，浏览器半边轮询消费（`GET /dsh-session-monitor/pending` → `uiWorkspace.openSession`）。窗口连续 10 次拉取失败会自闭（host 消失时不留孤儿窗口）；窗口被 × 关闭也会通知 host 同步状态。
 - **两路传输必须收敛成一次事件**：窗口刻意把每次交互同时发两遍（stdout 协议行 + HTTP POST），这样管道断了也不会让按钮静默失效。两条都会落到 host，所以 host 是唯一能把这一对折回成一次事件的地方——`acceptWindowReport()` 就是这个漏斗，并按「事件种类 + 目标 + 300ms 窗口」去重。**这不是锦上添花**：行点击是幂等的，但**开关类**操作被应用两次就自己抵消，按钮看起来完全没反应（修复前实测：一次 ▼ 点击排出 `["p-1","p-1"]`）。不同的父项、以及用户真正再点一次，都不受影响。
-- **窗口前置**：`window.focus()` 对另一个 OS 窗口无效（浏览器半边在沙箱 iframe 里），而 COM 的 `WScript.Shell.AppActivate` 会报成功却让**最小化**窗口继续最小化（实测）。所以行点击时 host 半边 spawn `lib/focus.ps1`，脚本沿**自己的进程祖先链**找到拥有主窗口的进程（host 半边正是它的子进程），用 `ShowWindow(SW_RESTORE)` + `SetForegroundWindow` 还原并置前，必要时退到 `AttachThreadInput` 那套前台夺取手法。匹配限定在应用自身的窗口类，因此外置窗自己（`HwndWrapper[...]`）永远不会被误当成目标。同一时刻最多一个 helper；超时即杀，插件卸载时一并清理。
+- **窗口前置**：`window.focus()` 对另一个 OS 窗口无效（浏览器半边在沙箱 iframe 里），而 COM 的 `WScript.Shell.AppActivate` 会报成功却让**最小化**窗口继续最小化（实测）。所以行点击时 host 半边 spawn `lib/focus.ps1`，沿**自己的进程祖先链**找到拥有主窗口的进程（host 半边正是它的子进程）并把窗口带回前台。三种起始状态都要处理，因为应用三种都会用：
+  - **最小化** → `ShowWindow(SW_RESTORE)`
+  - **隐藏到系统托盘** → `ShowWindow(SW_SHOW)`。这是最容易踩的一种：DSH 的「关闭」其实是把自己藏进托盘（`main.js` 中 `window.on("close")` → `preventDefault()` → `window.hide()`），藏起来之后窗口**既不 visible 也不 iconic**。早期版本用 `IsWindowVisible` 过滤候选窗口，于是对这种状态报「no app window found」，第二次点击永远拉不回来（实测复现并修复）。
+  - **只是被别的窗口盖住** → `SW_SHOW` 不改变什么，起作用的是前台调用；被系统拒绝时退到 `AttachThreadInput` 那套前台夺取手法。
+
+  显示是**异步**的（`ShowWindow` 可以返回 false，而窗口约 100ms 后才真正出现，实测），所以脚本会轮询确认窗口确实可见后才报成功，并按 `unhidden` / `restored` / `shown` 与 `foreground` / `background` / `still-hidden` 如实汇报——「报成功而窗口其实还在托盘」正是之前「看着能用其实没生效」的根源。
+
+  目标窗口的选择同样踩过坑：应用还拥有**标题为空的同族辅助窗口**，早期按「可见者优先」挑，结果挑中辅助窗口、把还原作用在谁也看不见的窗口上。现在**必须带标题**，可见性只用于打破平局；接受的窗口类也从 `Chrome_WidgetWin_0`（辅助窗用的）收窄到 `Chrome_WidgetWin_1`（真正的主窗口）。同一时刻最多一个 helper；超时即杀，插件卸载时一并清理。
 - web profile / 非 Windows：路由答 `ok:false`，自动回退 Document PiP → `window.open` 弹窗 → 应用内面板；窗口前置请求也被拒绝而不报错。
 - `lib/index.js` 同时承担空载体职责：让 Loader 树里有条目，浏览器半边才能被发现并送进页面。
 
@@ -84,7 +91,8 @@ dsh plugin --profile desktop add "github:liugangnhm/dsh-session-monitor#main"
 - 依赖的公开契约：`shell.overlay`、`ctx.sessions.list`、`ctx.uiWorkspace.openSession`、`StateDot/Toast`、`documentPictureInPicture`（web profile 增强）。
 - **子 agent 状态粒度**：优先取官方统一状态源（子 agent 也在其中，故有运行中/待处理/未读完成）。host 端只为「外置窗里那些没有真实 summary 的投影条目」退化成 `running`/空闲两态，`updatedAt` 为 0 时排序按原有规则处理。
 - **桌面壳的外置窗路径**：浏览器半边在桌面壳的沙箱 iframe 里，Document PiP 报 `Internal error: no window`、`window.open` 被拦——桌面版由 host 半边 spawn PowerShell WPF 置顶窗（frameless，靠顶部条拖动、右下角缩放、右上角 × 或面板「收回」关闭；连续 10 秒拉不到状态会自闭）。外观是系统 WPF 风格而非应用主题色；若 spawn 失败（极少见），回退链退到 PiP/弹窗/应用内面板，失败 toast 带完整原因。
-- **窗口前置的平台约束**：`SetForegroundWindow` 受 Windows 前台策略限制——当前前台进程不是 DSH 时，系统可能拒绝把窗口提到最前。实测「最小化 → 还原并置前」稳定可用（本机 Win11 已验证），必要时脚本会退到 `AttachThreadInput` 手法；若仍被系统拒绝，脚本会在返回值里如实报告 `background` 而不是假装成功。
+- **窗口前置的平台约束**：`SetForegroundWindow` 受 Windows 前台策略限制——当前前台进程不是 DSH 时，系统可能拒绝把窗口提到最前。本机实测「最小化 → 还原置前」「托盘隐藏 → 重新显示并置前」都可用（连续三次托盘隐藏都能拉回）；必要时脚本会退到 `AttachThreadInput` 手法，若仍被拒绝则在返回值里如实报告 `background` / `still-hidden` 而不是假装成功。
+- **已知未解释的现象**：有报告称「DSH 已在前台时点击会话会把应用藏进托盘」。已实测的结论是：`focus.ps1` 的每一步（`ShowWindow` / `SetForegroundWindow` / `BringWindowToTop` / 整段序列）单独或连续执行都**不会**隐藏窗口，窗口静置 30 秒、以及「被置顶窗口抢走焦点」各 8 轮也都是 0 次隐藏；只有整条 `/focus` 路由在 6 轮里出现过 1 次，未能稳定复现。已确认应用的「关闭」按钮走的就是隐藏进托盘（`main.js` 的 `window.on("close")` → `hide()`），所以这是应用自身的设计行为；如果你再次遇到，请告知当时的操作序列，以便定位是哪一步把窗口的关闭事件送了出去。
 - **系统通知**：依赖桌面版的通知通道；不可用时回退应用内 Toast。
 - 「错误态」暂不单独成色（客户端无现成的单会话错误状态源），留待后续版本。
 
@@ -95,14 +103,14 @@ node test/client.test.mjs         # 浏览器半边离线断言
 node test/host-check.mjs          # host 半边：路由、拒绝路径（--run 真开窗 + 真还原窗口）
 node test/window-check.mjs        # 外置窗脚本：BOM、5.1 解析、各态与层级行渲染、点击带 id（--run 验 READY 握手）
 node test/window-origin.test.mjs  # 外置窗轮询地址推导（含沙箱帧 "null" 回归）
-node test/focus-e2e.mjs           # 真开窗口 → 最小化 → 经 focus.ps1 还原（端到端）
+node test/focus-e2e.mjs           # 真开窗口 → 最小化 / 隐藏到托盘 → 经 focus.ps1 还原（端到端）
 ```
 
 - `client.test.mjs`：以与 `@deepseek-ai/dsh-client-modules` 相同的方式载入 `lib/client.js`（捕获 `window.__ModuleLoader__.load`、桩 React/原语/ctx），断言注册位置与字典、行状态映射与排序、活跃/全部过滤、点击跳转、面板默认隐藏与侧边栏入口、外置失败诊断 toast、快照推送与队列消费，以及离开时的通知触发。另含几组新断言：**子 agent 只出现在 `byId` 时也能进面板**（含缩进、独立状态、折叠记忆与「折叠的空闲父项不被活跃过滤误删」）、**被折叠藏起来的子 agent 完成时照样通知**、**透明度可调/被夹取/下次启动恢复**（用真会读写的存储桩 + 真正重启实例，而不是只重渲染）、**行点击会请求 host 还原窗口**，以及 **PiP 窗口与面板拿的是同一个透明度、同样渲染子 agent 缩进**（PiP 是另一套 DOM 渲染路径，最容易悄悄掉队）。还守住 `locale/*.json` 与代码字典逐键一致（这条检查当年就发现了一个从未被引用的死键）。
 - `host-check.mjs`：用桩 Cordis 上下文驱动真实 `apply()`，断言八条路由注册、非回环调用被拒、错误方法/畸形请求体返回 4xx，并守住一条真实事故——`windowWorkDirectory()` 把变量当函数调，导致每次开窗都 400、窗口永不出现（`--run` 时真开窗并核对进程存在）。另有**两路传输去重**一组：把同一次交互按窗口的做法发两遍，断言只排进一次、排空后队列干净、用户再点一次仍然生效、不同父项互不掩盖——这条守住的正是「开关被应用两次 → 按钮看起来完全没反应」。`--run` 另含窗口前置：拿一个**临时窗口**（绝不动用户自己的 DSH 窗口）最小化后交给 `lib/focus.ps1`，断言它真的被还原。
 - `window-check.mjs`：直接读 `lib/window.ps1`（脚本已独立成文件，不再从 JS 里抠字符串）。守住几件事：**BOM 必须存在**（5.1 按 ANSI 读无 BOM 的 .ps1，中文全乱码）、五种状态都能构建行（`RepeatMode` 在 PowerShell 里设不了，曾让 running 行抛异常被 catch 吞掉 → 空白窗 + 自闭）、父项/折叠父项/子行三种层级行也都能构建、点击落在子元素上仍能把 id 带上（`MouseLeftButtonUp` 是直接路由事件，不冒泡）、透明度作用在 `$window.Opacity` 整窗而非某个画刷、**轮询移动滑杆不会被当成用户操作回传**（否则两半会互相覆盖同一个值），以及**用户自己的值在 host 追上之前不被轮询覆盖**（否则滑杆一松手就弹回原位）。
 - `window-origin.test.mjs`：锁住「沙箱帧报 `null` 时必须回退到请求 Host 头」——不然窗口会去拉 `null/...`，十次失败后被孤儿守卫关掉。
-- `focus-e2e.mjs`：端到端跑一遍真实路径——开一个窗口、调 Win32 把它最小化、调用 `lib/focus.ps1`，断言返回 `restored` 且窗口真的不再最小化，同时确认 host 半边的 `/focus` 路由已注册且永远不以 TypeError 作答（这条路由在每次点击行时都会被调用）。
+- `focus-e2e.mjs`：端到端跑一遍真实路径——开一个窗口、调 Win32 把它**最小化**，断言 `lib/focus.ps1` 返回 `restored` 且窗口真的不再最小化；再把它**隐藏**（模拟托盘，既不 visible 也不 iconic），断言脚本仍能找到它、报 `unhidden`、并且窗口**真的重新可见**。后一条守住的正是「第二次点击拉不回来」那个 bug：早期版本用 `IsWindowVisible` 过滤候选，对这种状态直接报「no app window found」。同时确认 host 半边的 `/focus` 路由已注册且永远不以 TypeError 作答（这条路由在每次点击行时都会被调用）。
 
 ## License
 

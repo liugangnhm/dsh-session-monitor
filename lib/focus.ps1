@@ -32,8 +32,11 @@ param(
   # it aborts the whole script before a single window is looked at (measured).
   [int]$TargetPid = 0,
   [int]$MaxDepth = 12,
-  # The app's top-level window class; Chromium/Electron uses these two.
-  [string[]]$WindowClass = @("Chrome_WidgetWin_1", "Chrome_WidgetWin_0")
+  # The app's MAIN window class. Only `Chrome_WidgetWin_1` qualifies: the app also
+  # owns visible `Chrome_WidgetWin_0` helper windows that carry no title, and
+  # accepting those made the restore target a window nobody can see (measured —
+  # enumeration showed a visible untitled _0 alongside the real titled _1).
+  [string[]]$WindowClass = @("Chrome_WidgetWin_1")
 )
 
 $ErrorActionPreference = "Stop"
@@ -66,22 +69,35 @@ public class SmFocus {
     public string Class = "";
     public string Title = "";
     public bool Minimized = false;
+    public bool Visible = false;
   }
 
   /**
-    The app's main window for one pid: a visible top-level window whose class
+    The app's main window for one pid: a TITLED top-level window whose class
     matches one of `classes`.
-    @param classes accepted window-class names or prefixes; the default is the
-      app's own. A prefix is enough because WPF decorates its class name with a
-      domain and a GUID (`HwndWrapper[DefaultDomain;...;guid]`).
+
+    Visibility is deliberately NOT required. DSH hides its window to the system
+    tray rather than minimizing it, leaving a window that is neither visible nor
+    iconic; requiring IsWindowVisible made this helper report "no app window
+    found" for exactly the state the tray leaves behind, so a second click could
+    never bring the app back (measured). SW_SHOW restores such a window, so a
+    hidden one is still a valid target.
+
+    A title is required, and visibility only breaks ties. The app keeps untitled
+    helper windows of the same class family on screen, so preferring "visible"
+    alone selected a helper over the real window (measured).
+
+    @param classes accepted window-class names or prefixes. A prefix is enough
+      because WPF decorates its class name with a domain and a GUID
+      (`HwndWrapper[DefaultDomain;...;guid]`).
   */
   public static Found WindowOf(uint pid, string[] classes) {
     Found hit = null;
     EnumWindows(delegate(IntPtr h, IntPtr p) {
-      if (hit != null) return true;
       uint wpid; GetWindowThreadProcessId(h, out wpid);
       if (wpid != pid) return true;
-      if (!IsWindowVisible(h)) return true;
+      // Once a visible, titled window is in hand there is nothing better to find.
+      if (hit != null && hit.Visible && hit.Title.Length > 0) return true;
       StringBuilder c = new StringBuilder(300); GetClassName(h, c, c.Capacity);
       string cls = c.ToString();
       // Anything else (the monitor's own WPF window, IME windows, tray
@@ -89,35 +105,58 @@ public class SmFocus {
       bool matches = false;
       foreach (string wanted in classes) if (cls.StartsWith(wanted)) { matches = true; break; }
       if (!matches) return true;
-      Found f = new Found();
-      f.Hwnd = h; f.Pid = wpid; f.Class = cls;
       int len = GetWindowTextLength(h);
+      // An untitled window of the same class is a helper, not the app window.
+      if (len == 0) return true;
       StringBuilder t = new StringBuilder(len + 2);
       GetWindowText(h, t, t.Capacity);
+      Found f = new Found();
+      f.Hwnd = h; f.Pid = wpid; f.Class = cls;
       f.Title = t.ToString();
       f.Minimized = IsIconic(h);
-      hit = f;
+      f.Visible = IsWindowVisible(h);
+      // A window already on screen wins over a hidden one; ties keep the first
+      // seen, which is the main window in practice.
+      if (hit == null || (f.Visible && !hit.Visible)) hit = f;
       return true;
     }, IntPtr.Zero);
     return hit;
   }
 
   /**
-    Restore (if minimized) and foreground one window.
+    Bring one window back and put it in front.
 
-    SetForegroundWindow is refused when the caller is not the foreground
-    process, which is exactly this process's situation, so a refusal falls back
-    to the documented AttachThreadInput workaround before giving up.
+    Three starting states have to be handled, because the app uses all of them:
+    minimized (SW_RESTORE), hidden to the tray (SW_SHOW — a hidden window is not
+    iconic, so SW_RESTORE is not the right call), and merely behind another window
+    (SW_SHOW changes nothing, only the foreground call matters).
+
+    Showing is asynchronous on this app: `ShowWindow` returned false and the
+    window only became visible about 100ms later (measured), so the sequence
+    WAITS for the window to actually appear before claiming success. Reporting
+    success while still hidden is what made the earlier version look like it
+    worked when the app stayed in the tray.
+
+    SetForegroundWindow is refused when the caller is not the foreground process,
+    which is exactly this process's situation, so a refusal falls back to the
+    documented AttachThreadInput workaround before giving up.
   */
   public static string Raise(IntPtr h) {
     if (h == IntPtr.Zero) return "no-window";
     bool wasMinimized = IsIconic(h);
-    ShowWindow(h, wasMinimized ? 9 /* SW_RESTORE */ : 5 /* SW_SHOW */);
-    bool foreground = GetForegroundWindow() == h;
-    if (!foreground) {
-      if (SetForegroundWindow(h)) {
+    bool wasVisible = IsWindowVisible(h);
+
+    // The show and the foreground call are retried together: taking the
+    // foreground can only succeed once the window is on screen, and the app may
+    // need a moment before either sticks.
+    bool foreground = false;
+    for (int attempt = 0; attempt < 10; attempt++) {
+      if (IsIconic(h)) ShowWindow(h, 9 /* SW_RESTORE */);
+      else ShowWindow(h, 5 /* SW_SHOW */);
+
+      if (GetForegroundWindow() == h) {
         foreground = true;
-      } else {
+      } else if (!SetForegroundWindow(h)) {
         IntPtr current = GetForegroundWindow();
         uint otherPid;
         uint otherThread = GetWindowThreadProcessId(current, out otherPid);
@@ -130,8 +169,20 @@ public class SmFocus {
         }
         foreground = GetForegroundWindow() == h;
       }
+
+      // Done as soon as the window is both on screen and in front.
+      if (IsWindowVisible(h) && !IsIconic(h) && foreground) break;
+      System.Threading.Thread.Sleep(90);
     }
-    return (wasMinimized ? "restored" : "shown") + ":" + (foreground ? "foreground" : "background");
+
+    // The starting state is reported: "unhidden" is the tray case, and knowing
+    // which one it was is what makes a failure diagnosable from the Host's log.
+    // The OUTCOME is reported too, so a caller can tell "brought back" from
+    // "tried and the app stayed hidden".
+    string what = !wasVisible ? "unhidden" : wasMinimized ? "restored" : "shown";
+    bool visibleNow = IsWindowVisible(h);
+    string outcome = visibleNow ? (foreground ? "foreground" : "background") : "still-hidden";
+    return what + ":" + outcome;
   }
 }
 '@
@@ -169,6 +220,7 @@ try {
     $answer.pid = [int]$window.Pid
     $answer.title = $window.Title
     $answer.minimized = $window.Minimized
+    $answer.hidden = -not $window.Visible
     $answer.action = [SmFocus]::Raise($window.Hwnd)
     $answer.foreground = ([SmFocus]::GetForegroundWindow() -eq $window.Hwnd)
   }
