@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Session monitor",
-    "description": "A lightweight session-status HUD: live sessions and their sub-agents with color-coded states, an adjustable background opacity that is remembered, system notifications when a session finishes or needs you, an optional always-on-top detached window, and one-click jump to a session that also brings the app back to the front."
+    "description": "A lightweight session-status HUD: live sessions and their sub-agents with color-coded states, an adjustable whole-panel opacity that is remembered, system notifications when a session finishes or needs you, an optional always-on-top detached window, and one-click jump to a session that also brings the app back to the front."
   },
   "panel.title": "Sessions",
   "panel.count": "{n} sessions",
@@ -18,7 +18,7 @@
   "panel.empty": "No sessions",
   "panel.emptyActive": "No active sessions",
   "panel.opacity": "Opacity",
-  "panel.opacityTip": "Adjusts the panel background only; text and status dots stay sharp. Saved automatically",
+  "panel.opacityTip": "Adjusts the whole panel including its text and status dots. Saved automatically",
   "panel.collapseChildren": "Collapse sub-agents",
   "panel.expandChildren": "Expand sub-agents",
   "state.running": "Running",

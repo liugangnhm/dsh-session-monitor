@@ -58,20 +58,20 @@ check(
 );
 check("the hint carries the visible/total counts", /\$rows\.Count \+ "\/" \+ \$total/.test(text));
 
-// --- background opacity ---------------------------------------------------------
+// --- whole-window opacity -------------------------------------------------------
 //
-// The window has to be allowed to composite over the desktop at all, or the
-// alpha on the surface brush would be silently ignored (WPF refuses a
-// translucent Background without AllowsTransparency, and throws at load time if
-// the window is not borderless).
-check("the window can composite a translucent background", /AllowsTransparency="True"/.test(text));
+// The fade is whole-window (text included), so it uses Window.Opacity rather than
+// an alpha on one brush. The window still has to allow compositing over the
+// desktop at all, or WPF ignores that opacity (and throws at load time if the
+// window is not borderless).
+check("the window can composite over the desktop", /AllowsTransparency="True"/.test(text));
 check("the window background is fully transparent, not a color", /Background="#00000000"/.test(text));
 check(
-	"the panel surface is a named element the alpha can be applied to",
-	/x:Name="Shell"/.test(text) && /function Set-PanelAlpha/.test(text),
+	"the fade is applied to the whole window, not one brush",
+	/\$window\.Opacity = \$clamped/.test(text),
 );
 check(
-	"the alpha is clamped so the panel cannot become unreadable",
+	"the fade is clamped so the panel cannot become unusable",
 	/\[Math\]::Max\(0\.2, \$Alpha\)/.test(text),
 );
 check("the window offers an opacity slider", /x:Name="OpacitySlider"/.test(text) && /Set-PanelAlpha/.test(text));
@@ -81,9 +81,27 @@ check(
 	"a poll-driven slider move is not reported back as a user edit",
 	/\$script:syncingOpacity/.test(text) && /if \(\$script:syncingOpacity -eq \$true\) \{ return \}/.test(text),
 );
+// The snap-back guard: while the user's own change is still travelling to the
+// Host, a poll must not adopt the Host's previous value. Without it the slider
+// visibly jumps home the moment the user lets go (measured in the running app).
+check(
+	"the window keeps the user's own value until the Host catches up",
+	/function Set-LocalOpacity/.test(text) && /function Accepts-RemoteOpacity/.test(text) &&
+		/if \(Accepts-RemoteOpacity \$alpha\)/.test(text),
+);
+check(
+	"the slider records its own value before publishing it",
+	/\$value = Set-LocalOpacity \$opacitySlider\.Value/.test(text),
+);
 check(
 	"the slider reports its value on the second transport too",
 	/function Send-Opacity/.test(text) && /action = "set-opacity"/.test(text),
+);
+// A blocking HTTP POST per drag step stutters the drag, so the redundant
+// transport is coalesced instead of fired on every pixel.
+check(
+	"the redundant transport is debounced rather than sent per drag step",
+	/\$script:pendingOpacityPost/.test(text) && /Add_Tick\(\{/.test(text),
 );
 
 // --- sub-agents -----------------------------------------------------------------

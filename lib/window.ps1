@@ -63,7 +63,7 @@ $zh = @{
   FilterAll = "全部"
   NotifyOn = "通知开"
   NotifyOff = "通知关"
-  OpacityTip = "背景透明度（只影响背景，文字保持清晰）"
+  OpacityTip = "透明度（整个窗口一起变透，含文字）"
   States = @{ running = "运行中"; attention = "待处理"; done = "已完成"; idle = "空闲" }
 }
 $en = @{
@@ -75,16 +75,16 @@ $en = @{
   FilterAll = "All"
   NotifyOn = "Notify"
   NotifyOff = "Muted"
-  OpacityTip = "Background opacity (background only; text stays sharp)"
+  OpacityTip = "Opacity (fades the whole window, text included)"
   States = @{ running = "Running"; attention = "Needs you"; done = "Done"; idle = "Idle" }
 }
 $L = if ($Lang -eq "en") { $en } else { $zh }
 $tones = @{ running = "#FF8AB4F8"; attention = "#FFFDD663"; done = "#FF81C995"; idle = "#FF9AA0A6" }
 $brush = [System.Windows.Media.BrushConverter]::new()
 
-# The window chrome is translucent (see AllowsTransparency below); the panel
-# surface itself is painted from this base color at the state's alpha, so only
-# the background fades while labels, dots and borders keep full contrast.
+# The whole window fades together (see Set-PanelAlpha): labels, dots, buttons
+# and the surface all composite at the same alpha, so a low setting is a
+# uniformly see-through panel rather than a sharp panel on a faded card.
 $surfaceRgb = @(0x20, 0x21, 0x24)
 $surfaceBorder = "#FF3C4043"
 
@@ -174,21 +174,64 @@ $script:notifyOn = $true
 # True while a poll is programmatically moving the slider, so ValueChanged can
 # tell an incoming setting from a user drag.
 $script:syncingOpacity = $false
+# The alpha the user last set here, and when. A poll must not yank the slider
+# back to a stale Host value while the round trip that publishes this change is
+# still in flight (the Host only learns about it when the browser half next
+# drains, up to ~0.7s later, and the state push after that takes longer still).
+$script:localOpacity = $null
+$script:localOpacityAt = [DateTime]::MinValue
+# The alpha waiting to be POSTed once the drag settles, and its timer.
+$script:pendingOpacityPost = $null
 
 <#
-  Paint the panel surface at one background alpha.
+  Fade the WHOLE window (surface, labels, dots, buttons) to one alpha.
 
-  Only `$shell.Background` carries the alpha. Every label, dot and border keeps
-  its own opaque brush, which is what makes a see-through panel still readable;
-  the window itself is transparent (AllowsTransparency) so the faded surface is
-  what the desktop shows through.
+  `$window.Opacity` composites the entire visual tree, so the text fades with
+  the background instead of staying sharp on a faded card. The brushes keep
+  their own opaque colors on purpose: the translucency comes from compositing,
+  which is what makes one slider govern everything at once.
 #>
 function Set-PanelAlpha([double]$Alpha) {
   $clamped = [Math]::Min(1.0, [Math]::Max(0.2, $Alpha))
-  $byte = [byte][Math]::Round($clamped * 255)
-  $shell.Background = $brush.ConvertFromString(("#{0:X2}{1:X2}{2:X2}{3:X2}" -f $byte, $surfaceRgb[0], $surfaceRgb[1], $surfaceRgb[2]))
+  $window.Opacity = $clamped
   $opacityText.Text = ("{0}%" -f [int][Math]::Round($clamped * 100))
   return $clamped
+}
+
+<#
+  Record that the user just moved the slider themselves.
+
+  Until the Host echoes this value back, polls must leave the slider and the
+  window alone; otherwise the poll's stale value visibly snaps the slider home
+  the moment the user lets go.
+#>
+function Set-LocalOpacity([double]$Alpha) {
+  $script:localOpacity = $Alpha
+  $script:localOpacityAt = [DateTime]::UtcNow
+  return (Set-PanelAlpha $Alpha)
+}
+
+<#
+  Whether a poll may still adopt the Host's value.
+
+  True while the user's own change is newer than the grace period AND the Host
+  has not caught up to it yet; once the Host reports the same value, the two
+  agree and polls resume as normal.
+#>
+function Accepts-RemoteOpacity([double]$RemoteAlpha) {
+  if ($script:localOpacity -eq $null) { return $true }
+  if ([Math]::Abs($RemoteAlpha - $script:localOpacity) -lt 0.001) {
+    # The Host agrees now; stop overriding it.
+    $script:localOpacity = $null
+    return $true
+  }
+  $age = ([DateTime]::UtcNow - $script:localOpacityAt).TotalMilliseconds
+  if ($age -gt 4000) {
+    # The Host never caught up (e.g. the browser half is gone); stop fighting.
+    $script:localOpacity = $null
+    return $true
+  }
+  return $false
 }
 
 <#
@@ -221,8 +264,15 @@ function Send-Children([string]$Id) {
   }
 }
 
+<#
+  POST one alpha, without the stdout line.
+
+  The slider sends the stdout line itself on every step (it is the immediate,
+  non-blocking transport) and calls this only from its debounce timer, so the
+  two transports do not double up and a drag does not stall on a blocking
+  request per pixel.
+#>
 function Send-Opacity([double]$Value) {
-  Send "opacity" @{ value = $Value }
   try {
     $payload = @{ action = "set-opacity"; value = $Value } | ConvertTo-Json -Compress
     Invoke-WebRequest -Uri ($Origin + $CommandPath) -Method POST -ContentType "application/json" -Body $payload -TimeoutSec 4 -UseBasicParsing | Out-Null
@@ -387,20 +437,24 @@ function Update-List {
     $notifyButton.Content = if ($notifyOn) { $L.NotifyOn } else { $L.NotifyOff }
     Set-ToggleLook -Button $notifyButton -On $notifyOn
 
-    # The alpha follows the browser half's saved setting. The slider is only
-    # moved when the incoming value differs, and the programmatic move is
-    # guarded so it cannot echo back as a user edit.
+    # The alpha follows the browser half's saved setting — but NOT while the
+    # user's own change is still travelling to it. Adopting a stale value here is
+    # exactly what made the slider snap back to where it started: the user let go,
+    # the next poll (up to a second later) still saw the Host's previous value and
+    # moved the slider home before the round trip could publish the new one.
     $alpha = 1.0
     if ($data.opacity -ne $null) { $alpha = [double]$data.opacity }
-    if ([Math]::Abs($opacitySlider.Value - $alpha) -gt 0.001) {
-      $script:syncingOpacity = $true
-      try {
-        $opacitySlider.Value = [Math]::Min(1.0, [Math]::Max(0.2, $alpha))
-      } finally {
-        $script:syncingOpacity = $false
+    if (Accepts-RemoteOpacity $alpha) {
+      if ([Math]::Abs($opacitySlider.Value - $alpha) -gt 0.001) {
+        $script:syncingOpacity = $true
+        try {
+          $opacitySlider.Value = [Math]::Min(1.0, [Math]::Max(0.2, $alpha))
+        } finally {
+          $script:syncingOpacity = $false
+        }
       }
+      Set-PanelAlpha $alpha | Out-Null
     }
-    Set-PanelAlpha $alpha | Out-Null
 
     $rows = @()
     if ($data.rows) { $rows = @($data.rows) }
@@ -455,15 +509,36 @@ $filterButton.Add_Click({ Send-Command "toggle-filter" })
 $notifyButton.Add_Click({ Send-Command "toggle-notify" })
 $closeButton.Add_Click({ $window.Close() })
 
-# The slider reports its value on every move, so the panel fades as it is
-# dragged. The browser half owns the setting (and persists it); this only shows
-# the change immediately and reports it.
+# The slider fades the whole window as it is dragged, and reports where it
+# landed. The browser half owns the setting (and persists it), so this shows the
+# change immediately and then publishes it.
+#
+# The stdout line goes out on every step: it is cheap, and it is the transport
+# the Host reads without being asked. The HTTP POST is the redundant second
+# transport, and it is debounced instead of sent per step because it is a
+# blocking local request — firing it on every pixel of a drag stutters the drag.
+# The debounce means the value the user settles on is always posted.
+$script:opacityPostTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:opacityPostTimer.Interval = [TimeSpan]::FromMilliseconds(220)
+$script:opacityPostTimer.Add_Tick({
+  $script:opacityPostTimer.Stop()
+  if ($script:pendingOpacityPost -ne $null) {
+    $value = $script:pendingOpacityPost
+    $script:pendingOpacityPost = $null
+    Send-Opacity $value
+  }
+})
+
 $opacitySlider.Add_ValueChanged({
   # A poll that moved the slider to match the saved setting is not a user edit;
   # echoing it back would make the two halves fight over the value.
   if ($script:syncingOpacity -eq $true) { return }
-  $value = Set-PanelAlpha $opacitySlider.Value
-  Send-Opacity $value
+  $value = Set-LocalOpacity $opacitySlider.Value
+  # The stdout line is immediate; the POST is coalesced behind the debounce.
+  Send "opacity" @{ value = $value }
+  $script:pendingOpacityPost = $value
+  $script:opacityPostTimer.Stop()
+  $script:opacityPostTimer.Start()
 })
 # The readiness handshake is the Host's proof that a window really exists.
 $window.Add_ContentRendered({ Send "ready" $null })

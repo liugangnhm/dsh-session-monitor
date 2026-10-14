@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "会话监控",
-    "description": "轻量会话状态悬浮面板：实时列出各会话与子 agent 并以颜色区分状态，背景透明度可调并自动记忆，必要时系统通知，可外置为不随 DSH 最小化的置顶小窗，点击行跳转对应会话并把 DSH 拉回前台。"
+    "description": "轻量会话状态悬浮面板：实时列出各会话与子 agent 并以颜色区分状态，整体透明度可调并自动记忆，必要时系统通知，可外置为不随 DSH 最小化的置顶小窗，点击行跳转对应会话并把 DSH 拉回前台。"
   },
   "panel.title": "会话监控",
   "panel.count": "{n} 个会话",
@@ -18,7 +18,7 @@
   "panel.empty": "暂无会话",
   "panel.emptyActive": "暂无活跃会话",
   "panel.opacity": "透明度",
-  "panel.opacityTip": "只调整面板背景的透明度，文字与状态点保持清晰；设置会自动保存",
+  "panel.opacityTip": "调整整个面板的透明度（含文字与状态点）；设置会自动保存",
   "panel.collapseChildren": "收起子 agent",
   "panel.expandChildren": "展开子 agent",
   "state.running": "运行中",

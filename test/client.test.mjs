@@ -628,17 +628,20 @@ check("changing the opacity persists it", storage.get("sm.opacity") === "0.5");
 panel = renderPanel();
 const translucentRoot = collectByClass(panel, "sm-root")[0];
 check(
-	"the panel background carries the chosen alpha",
-	/rgba\(32,\s*33,\s*36,\s*0?\.5\)/.test(String(translucentRoot.props.style.background)),
+	"the panel root carries the chosen opacity",
+	String(translucentRoot.props.style.opacity) === "0.5",
 );
 check(
 	"the panel reports the opacity back to the user",
 	collectByClass(panel, "sm-opacity-value")[0].children[0] === "50%",
 );
-// Only the background is translucent: the text color stays its own opaque token.
+// The whole surface fades as one layer: text, dots and borders dim with it
+// rather than staying sharp on a faded card. That is a property of compositing
+// the root, so the assertion is that the fade is NOT selectively re-applied to
+// the child colours (which would defeat the point).
 check(
-	"the panel text color is left untouched by the alpha",
-	translucentRoot.props.style.color === undefined,
+	"the fade is applied to the whole panel, not re-applied per element",
+	translucentRoot.props.style.background === undefined && translucentRoot.props.style.color === undefined,
 );
 
 // An out-of-range stored value is clamped rather than trusted, so a hand-edited
@@ -661,8 +664,15 @@ check(
 	collectByClass(reloaded, "sm-opacity-value")[0].children[0] === "80%",
 );
 check(
-	"the restored opacity is applied to the background, not just the label",
-	/rgba\(32,\s*33,\s*36,\s*0?\.8\)/.test(String(collectByClass(reloaded, "sm-root")[0].props.style.background)),
+	"the restored opacity is applied to the panel, not just the label",
+	String(collectByClass(reloaded, "sm-root")[0].props.style.opacity) === "0.8",
+);
+// At full opacity the panel carries no style at all, so a default panel is not
+// paying for a no-op compositing layer.
+storage.set("sm.opacity", "1");
+check(
+	"a full-opacity panel renders without an opacity style",
+	collectByClass(bootFresh(), "sm-root")[0].props.style.opacity === undefined,
 );
 storage.delete("sm.opacity");
 
@@ -909,12 +919,11 @@ check(
 	pipList.children.some((child) => /\bchild\b/.test(child.className || "")),
 );
 // The requirement is that the setting reads the same in both places, so this
-// compares the two surfaces instead of restating the alpha.
-const panelSurface = String(collectByClass(renderPanel(), "sm-root")[0].props.style.background);
+// compares the two surfaces instead of restating the number.
+const panelSurface = String(collectByClass(renderPanel(), "sm-root")[0].props.style.opacity);
 check(
-	"the PiP window applies the same background opacity as the panel",
-	String(pipDocument.body.style.background) === panelSurface &&
-		/rgba\(32,\s*33,\s*36,\s*0?\.35\)/.test(String(pipDocument.body.style.background)),
+	"the PiP window applies the same opacity as the panel",
+	String(pipDocument.body.style.opacity) === panelSurface && panelSurface === "0.35",
 );
 
 // Clicking a row IN THE DETACHED WINDOW must also restore the app: the focus
