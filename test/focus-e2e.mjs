@@ -21,7 +21,7 @@ import { join } from "node:path";
 
 const powershell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
 
-/** The Win32 probe used to minimize and inspect the victim. */
+/** The Win32 probe used to minimize, hide and inspect the victim. */
 const PROBE = `
 Add-Type -TypeDefinition @'
 using System;
@@ -34,24 +34,109 @@ public class SmE2E {
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int max);
+  [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool GetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT placement);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+  [StructLayout(LayoutKind.Sequential)]
+  public struct WINDOWPLACEMENT {
+    public int length;
+    public int flags;
+    public int showCmd;
+    public POINT minPosition;
+    public POINT maxPosition;
+    public RECT normalPosition;
+  }
+
+  public static bool IsForeground(IntPtr h) { return GetForegroundWindow() == h; }
+
+  /**
+    Show the window and take the foreground, satisfying the foreground lock.
+
+    SetForegroundWindow is refused when the caller is not the foreground process,
+    which a freshly spawned probe never is, so a refusal attaches to the current
+    foreground thread first — the same workaround the production helper uses.
+  */
+  public static bool Raise(IntPtr h) {
+    if (h == IntPtr.Zero) return false;
+    ShowWindow(h, 5);
+    if (GetForegroundWindow() == h) return true;
+    if (SetForegroundWindow(h)) return true;
+    IntPtr cur = GetForegroundWindow();
+    uint pid; uint other = GetWindowThreadProcessId(cur, out pid);
+    uint mine = GetCurrentThreadId();
+    if (other != 0 && other != mine) {
+      AttachThreadInput(mine, other, true);
+      BringWindowToTop(h);
+      SetForegroundWindow(h);
+      AttachThreadInput(mine, other, false);
+    }
+    return GetForegroundWindow() == h;
+  }
+
+  /**
+    The victim's real window, chosen the way production chooses it.
+
+    A WPF process owns several HwndWrapper windows — SystemResourceNotifyWindow,
+    MediaContextNotificationWindow, plus untitled shims — and some of them are
+    visible, so "first visible" picked a helper: the test then minimized a window
+    nobody was looking at and asserted against it. The window's RESTORED size is
+    what separates the real window from its helpers, and it is stable in every
+    state, which is why production uses it too.
+  */
   public static IntPtr Find(int pid) {
-    IntPtr hit = IntPtr.Zero;
+    IntPtr best = IntPtr.Zero;
+    long bestArea = 0;
     EnumWindows(delegate(IntPtr h, IntPtr p) {
-      if (hit != IntPtr.Zero) return true;
       uint wpid; GetWindowThreadProcessId(h, out wpid);
-      if (wpid != (uint)pid || !IsWindowVisible(h)) return true;
+      if (wpid != (uint)pid) return true;
       StringBuilder c = new StringBuilder(300); GetClassName(h, c, c.Capacity);
-      if (c.ToString().StartsWith("HwndWrapper")) { hit = h; return true; }
+      if (!c.ToString().StartsWith("HwndWrapper")) return true;
+      if (GetWindowTextLength(h) == 0) return true;
+      WINDOWPLACEMENT placement = new WINDOWPLACEMENT();
+      placement.length = Marshal.SizeOf(typeof(WINDOWPLACEMENT));
+      long area = 0;
+      if (GetWindowPlacement(h, ref placement)) {
+        area = Math.Max(0, placement.normalPosition.Right - placement.normalPosition.Left)
+             * (long)Math.Max(0, placement.normalPosition.Bottom - placement.normalPosition.Top);
+      }
+      if (area > bestArea) { bestArea = area; best = h; }
       return true;
     }, IntPtr.Zero);
-    return hit;
+    return best;
   }
 }
 '@
 `;
 
 const probe = (expression) => String(spawnSync(powershell, ["-NoProfile", "-Command", PROBE + expression], { encoding: "utf8" }).stdout || "").trim();
+
+/**
+ * Put the victim in the foreground and wait until Windows agrees.
+ *
+ * SetForegroundWindow is refused unless the caller already owns the foreground
+ * (the Windows foreground lock), and each `probe` spawns a PowerShell whose own
+ * console momentarily competes for it. So this attaches to the current foreground
+ * thread before raising, which is the documented way to satisfy the lock, and
+ * retries because a spawn can still race it.
+ */
+async function bringVictimToFront(handle) {
+	for (let attempt = 0; attempt < 15; attempt += 1) {
+		const result = probe(
+			`[SmE2E]::Raise([IntPtr]${handle})`,
+		);
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		if (probe(`[SmE2E]::IsForeground([IntPtr]${handle})`) === "True") return true;
+		void result;
+	}
+	return false;
+}
 
 const failures = [];
 const check = (label, condition) => {
@@ -215,6 +300,38 @@ if (handle !== "0" && handle !== "") {
 		probe(`[SmE2E]::IsWindowVisible([IntPtr]${handle})`) === "True",
 	);
 	if (trayParsed === null) console.error("    helper said:", trayReport, String(trayRun.stderr || "").slice(0, 200));
+
+	// --- the already-front no-op ---------------------------------------------
+	//
+	// The common case by far (the user is looking at the app and clicks a session
+	// to switch to it) must be a NO-OP. Issuing ShowWindow/SetForegroundWindow for
+	// a window that needs neither re-asserts its frame and z-order, which is what
+	// the user sees as a flicker.
+	const reachedFront = await bringVictimToFront(handle);
+	check("the victim could be brought to the front for this check", reachedFront);
+	if (reachedFront) {
+		const beforeFast = probe(`[SmE2E]::IsWindowVisible([IntPtr]${handle})`);
+		const fastRun = spawnSync(
+			powershell,
+			["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", focusScript, "-TargetPid", String(victim.pid), "-WindowClass", "HwndWrapper"],
+			{ encoding: "utf8" },
+		);
+		const fastReport = String(fastRun.stdout || "").trim().split("\n").pop();
+		let fastParsed = null;
+		try {
+			fastParsed = JSON.parse(fastReport);
+		} catch {}
+		check("an already-front window is still found", fastParsed?.ok === true);
+		check(
+			"an already-front window reports the no-op fast path",
+			String(fastParsed?.action ?? "").startsWith("already-front"),
+		);
+		check(
+			"the no-op left the window untouched",
+			probe(`[SmE2E]::IsWindowVisible([IntPtr]${handle})`) === beforeFast,
+		);
+		if (fastParsed === null) console.error("    helper said:", fastReport, String(fastRun.stderr || "").slice(0, 200));
+	}
 
 	// The route itself must answer JSON (and must be registered) — the browser
 	// half calls it on every row click, so a throw would break navigation.

@@ -677,6 +677,11 @@ check(
 storage.delete("sm.opacity");
 
 // --- raising the app window on a row click --------------------------------------
+//
+// The request is SKIPPED when this document already holds the focus: a click in
+// the in-app panel means the app is the foreground window already, so raising it
+// again only makes it flicker. A click from the detached window is a different
+// document, so it still asks — and the host helper repeats the check for real.
 
 const focusCalls = [];
 globalThis.fetch = (url, options) => {
@@ -694,13 +699,42 @@ listState = {
 	projectionsBySession: {},
 };
 for (const listener of listListeners) listener();
+
+// The app has the focus (the ctor stub above reports hasFocus() === true), so the
+// guard must suppress the request entirely.
+globalThis.document.hasFocus = () => true;
+globalThis.document.visibilityState = "visible";
+focusCalls.length = 0;
 panel = renderPanel();
 collectRows(panel)[0].props.onClick();
 await new Promise((resolve) => setTimeout(resolve, 20));
-check(
-	"a row click asks the host to restore the app window",
-	focusCalls.length === 1,
-);
+check("a click while the app already has focus sends no focus request", focusCalls.length === 0);
+
+// The app is not focused (the detached window was clicked, say), so it must ask.
+globalThis.document.hasFocus = () => false;
+focusCalls.length = 0;
+collectRows(renderPanel())[0].props.onClick();
+await new Promise((resolve) => setTimeout(resolve, 20));
+check("a click while the app is NOT focused asks the host to raise it", focusCalls.length === 1);
+
+// A hidden document must ask even if it claims focus.
+globalThis.document.hasFocus = () => true;
+globalThis.document.visibilityState = "hidden";
+focusCalls.length = 0;
+collectRows(renderPanel())[0].props.onClick();
+await new Promise((resolve) => setTimeout(resolve, 20));
+check("a hidden document still asks to be raised", focusCalls.length === 1);
+globalThis.document.visibilityState = "visible";
+
+// A document that cannot report focus must ask: failing to raise a hidden window
+// is far worse than one unnecessary request.
+globalThis.document.hasFocus = true; // present but not callable
+focusCalls.length = 0;
+collectRows(renderPanel())[0].props.onClick();
+await new Promise((resolve) => setTimeout(resolve, 20));
+check("a document that cannot report focus asks (fails safe)", focusCalls.length === 1);
+
+globalThis.document.hasFocus = () => true;
 globalThis.fetch = realFetch;
 
 // --- notifications ------------------------------------------------------------

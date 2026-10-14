@@ -62,6 +62,36 @@ public class SmFocus {
   [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] public static extern long GetWindowLong(IntPtr h, int index);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT rect);
+  [DllImport("user32.dll")] public static extern bool GetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT placement);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+  [StructLayout(LayoutKind.Sequential)]
+  public struct WINDOWPLACEMENT {
+    public int length;
+    public int flags;
+    public int showCmd;
+    public POINT minPosition;
+    public POINT maxPosition;
+    public RECT normalPosition;
+  }
+
+  /** GetWindowLong index for the extended window style. */
+  const int GWL_EXSTYLE = -20;
+  /** Extended style marking a tool window; a strong helper signal when present. */
+  const long WS_EX_TOOLWINDOW = 0x00000080L;
+  /**
+    Smallest RESTORED window area that can be the application window, in px².
+
+    Measured on this stack: the app window is 300x180 (54000px²) while the
+    same-class helpers are 0 and 5168. The decisive detail is that a MINIMIZED
+    window's live rect collapses to a tiny taskbar-adjacent box (measured 128x22),
+    which fails this test — and that made the helper reject the very window it was
+    asked to restore. So the size used here is the window's RESTORED size from
+    GetWindowPlacement, which stays 300x180 in every state.
+  */
+  const long MIN_APP_AREA = 160L * 120L;
 
   public class Found {
     public IntPtr Hwnd = IntPtr.Zero;
@@ -70,11 +100,13 @@ public class SmFocus {
     public string Title = "";
     public bool Minimized = false;
     public bool Visible = false;
+    /** The window's restored area in px², stable across minimize and hide. */
+    public long Area = 0;
   }
 
   /**
-    The app's main window for one pid: a TITLED top-level window whose class
-    matches one of `classes`.
+    The app's main window for one pid: the largest top-level window whose class
+    matches one of `classes` and that is big enough to be an application window.
 
     Visibility is deliberately NOT required. DSH hides its window to the system
     tray rather than minimizing it, leaving a window that is neither visible nor
@@ -83,9 +115,13 @@ public class SmFocus {
     never bring the app back (measured). SW_SHOW restores such a window, so a
     hidden one is still a valid target.
 
-    A title is required, and visibility only breaks ties. The app keeps untitled
-    helper windows of the same class family on screen, so preferring "visible"
-    alone selected a helper over the real window (measured).
+    Selection is by AREA, with visibility only breaking near-ties. A UI toolkit
+    keeps same-class bookkeeping windows around — WPF owns several titled
+    `HwndWrapper` windows (SystemResourceNotifyWindow, ...) plus an untitled shim —
+    and picking by first-match or by visibility alone selected one of those: a
+    minimized window then looked "already in front", and the restore was applied
+    to a window nobody can see (measured: real window 54000px², helpers 0 and
+    5168). Area separates them cleanly where titles and styles do not.
 
     @param classes accepted window-class names or prefixes. A prefix is enough
       because WPF decorates its class name with a domain and a GUID
@@ -96,8 +132,6 @@ public class SmFocus {
     EnumWindows(delegate(IntPtr h, IntPtr p) {
       uint wpid; GetWindowThreadProcessId(h, out wpid);
       if (wpid != pid) return true;
-      // Once a visible, titled window is in hand there is nothing better to find.
-      if (hit != null && hit.Visible && hit.Title.Length > 0) return true;
       StringBuilder c = new StringBuilder(300); GetClassName(h, c, c.Capacity);
       string cls = c.ToString();
       // Anything else (the monitor's own WPF window, IME windows, tray
@@ -105,9 +139,29 @@ public class SmFocus {
       bool matches = false;
       foreach (string wanted in classes) if (cls.StartsWith(wanted)) { matches = true; break; }
       if (!matches) return true;
+      // A tool window is never an application window.
+      long exStyle = GetWindowLong(h, GWL_EXSTYLE);
+      if ((exStyle & WS_EX_TOOLWINDOW) != 0) return true;
       int len = GetWindowTextLength(h);
-      // An untitled window of the same class is a helper, not the app window.
+      // An untitled window of the same class is a helper too.
       if (len == 0) return true;
+      // Size comes from the window's RESTORED placement, not its live rect: a
+      // minimized window's live rect is a tiny taskbar box (measured 128x22),
+      // which would wrongly fail the size test and hide the real window from this
+      // search precisely when it most needs restoring.
+      WINDOWPLACEMENT placement = new WINDOWPLACEMENT();
+      placement.length = Marshal.SizeOf(typeof(WINDOWPLACEMENT));
+      long area;
+      if (GetWindowPlacement(h, ref placement)) {
+        area = Math.Max(0, placement.normalPosition.Right - placement.normalPosition.Left)
+             * (long)Math.Max(0, placement.normalPosition.Bottom - placement.normalPosition.Top);
+      } else {
+        RECT live;
+        GetWindowRect(h, out live);
+        area = Math.Max(0, live.Right - live.Left) * (long)Math.Max(0, live.Bottom - live.Top);
+      }
+      // Too small to be the application window; skip the toolkit's shims.
+      if (area < MIN_APP_AREA) return true;
       StringBuilder t = new StringBuilder(len + 2);
       GetWindowText(h, t, t.Capacity);
       Found f = new Found();
@@ -115,9 +169,12 @@ public class SmFocus {
       f.Title = t.ToString();
       f.Minimized = IsIconic(h);
       f.Visible = IsWindowVisible(h);
-      // A window already on screen wins over a hidden one; ties keep the first
-      // seen, which is the main window in practice.
-      if (hit == null || (f.Visible && !hit.Visible)) hit = f;
+      f.Area = area;
+      // Largest wins; an on-screen window beats a hidden one of the same size.
+      bool better = hit == null
+        || f.Area > hit.Area
+        || (f.Area == hit.Area && f.Visible && !hit.Visible);
+      if (better) hit = f;
       return true;
     }, IntPtr.Zero);
     return hit;
@@ -131,6 +188,12 @@ public class SmFocus {
     iconic, so SW_RESTORE is not the right call), and merely behind another window
     (SW_SHOW changes nothing, only the foreground call matters).
 
+    When the window is ALREADY visible, un-minimized and in front, this returns
+    immediately without touching it. That case is the common one (the user is
+    looking at the app and clicks a session to switch to it) and issuing
+    ShowWindow/SetForegroundWindow for a window that needs neither makes it
+    visibly flicker, because those calls re-assert the frame and the z-order.
+
     Showing is asynchronous on this app: `ShowWindow` returned false and the
     window only became visible about 100ms later (measured), so the sequence
     WAITS for the window to actually appear before claiming success. Reporting
@@ -143,6 +206,14 @@ public class SmFocus {
   */
   public static string Raise(IntPtr h) {
     if (h == IntPtr.Zero) return "no-window";
+
+    // Fast path: nothing to do, so do nothing. This is a pure read — no
+    // ShowWindow, no SetForegroundWindow — which is what keeps the usual click
+    // flicker-free.
+    if (IsWindowVisible(h) && !IsIconic(h) && GetForegroundWindow() == h) {
+      return "already-front:foreground";
+    }
+
     bool wasMinimized = IsIconic(h);
     bool wasVisible = IsWindowVisible(h);
 
