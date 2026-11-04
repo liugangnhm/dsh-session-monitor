@@ -512,6 +512,40 @@ panel = renderPanel();
 check("the panel returns to the detach button", collect(panel, "sm-btn", []).some((node) => node.children[0] === "panel.detach"));
 globalThis.fetch = realFetch;
 
+// --- the probe decides which detach path is taken ---------------------------------
+//
+// The probe's `window` field — not its `desktop` field — is what says a native
+// Electron window can be produced. The two are genuinely different facts: a
+// desktop shell whose window program cannot launch is still a desktop process,
+// and treating it as "native window available" would send the user down a path
+// that silently produces nothing.
+{
+	const probeCalls = [];
+	globalThis.fetch = (url, options) => {
+		const target = String(url);
+		if (target.endsWith("/dsh-session-monitor/window")) {
+			probeCalls.push(options && options.body ? JSON.parse(options.body) : {});
+			return Promise.resolve({ json: () => Promise.resolve({ ok: true, open: true }) });
+		}
+		if (target.endsWith("/dsh-session-monitor/probe")) {
+			return Promise.resolve({ json: () => Promise.resolve({ ok: true, desktop: true, window: "none", raise: "electron" }) });
+		}
+		if (target.endsWith("/dsh-session-monitor/state")) return Promise.resolve({ json: () => Promise.resolve({ ok: true }) });
+		if (target.endsWith("/dsh-session-monitor/pending")) {
+			return Promise.resolve({ json: () => Promise.resolve({ ok: true, items: [] }) });
+		}
+		return Promise.reject(new Error("unexpected fetch " + target));
+	};
+	const fresh = bootFresh();
+	await new Promise((resolve) => setTimeout(resolve, 60));
+	check(
+		"a desktop host without a native window does not open one on start",
+		probeCalls.length === 0,
+	);
+	check("that host still shows the in-app card instead of failing silently", fresh !== undefined);
+	globalThis.fetch = realFetch;
+}
+
 // --- sub-agents: hierarchy, per-child state, and collapsing ---------------------
 
 // The host's projection writes sub-agents into `byId` and often leaves them OUT

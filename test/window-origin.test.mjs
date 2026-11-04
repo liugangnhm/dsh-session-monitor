@@ -8,8 +8,7 @@
  * guard closed it a few seconds after it appeared.
  *
  * `resolveWindowOrigin` is private to `lib/index.js`, so this check extracts
- * the function from the source and evaluates it, the same technique the window
- * smoke test uses for the generated PowerShell.
+ * the function from the source and evaluates it.
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";

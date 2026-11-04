@@ -157,7 +157,7 @@ check(
 
 // --- one press, two transports, one event -------------------------------------
 //
-// lib/window.ps1 reports every interaction on TWO transports (a stdout protocol
+// The window reports every interaction on TWO transports (a stdout protocol
 // line and an HTTP POST) so that a broken pipe cannot make a control silently
 // dead. Both land on the host, so the host is where the pair has to collapse
 // back into one event. This is not a nicety: a row click is idempotent, but a
@@ -365,10 +365,14 @@ function captureLaunch(outcome = {}) {
 // flag the check asserts the part that broke in production: the route answers
 // JSON, and a refusal explains itself instead of surfacing a TypeError.
 const state = { rows: [{ id: "host-check", title: "主机自检", state: "running", blank: false }], totalCount: 1 };
-const opened = await callRoute(routes.get(`${ROUTE}/window`), {
-	body: JSON.stringify(process.argv.includes("--run") ? { action: "open", state } : { action: "close" }),
-});
 
+// Whether this process could open the real window at all. The window is a real
+// Electron process launched from the desktop shell's executable, and this check
+// normally runs under plain Node — so the run-mode block below has to know when
+// it is unable to exercise the product path rather than report a fake failure.
+const inDesktopShell = typeof process.versions.electron === "string";
+
+const opened = await callRoute(routes.get(`${ROUTE}/window`), { body: JSON.stringify({ action: "close" }) });
 check("the window route answers with JSON", typeof opened.payload === "object" && opened.payload !== null);
 check(
 	"the window route never answers with a TypeError",
@@ -376,18 +380,36 @@ check(
 );
 check("a close request is acknowledged", opened.payload?.ok === true);
 
-if (process.argv.includes("--run") && process.platform === "win32") {
+// Outside the shell there is no Electron executable to mirror, so the refusal
+// must name that fact instead of throwing or silently doing nothing.
+if (!inDesktopShell) {
+	const refused = await callRoute(routes.get(`${ROUTE}/window`), { body: JSON.stringify({ action: "open", state }) });
+	check("a non-Electron host refuses the window with a reason", refused.payload?.ok === false && String(refused.payload?.error ?? "").length > 0);
+	check("the refusal names the missing desktop shell", /not the desktop shell/.test(String(refused.payload?.error ?? "")));
+}
+
+if (process.argv.includes("--run") && process.platform === "win32" && inDesktopShell) {
 	// Really start it, prove a process exists behind the answer, then close it.
+	//
+	// The window is now a real Electron process: the shell's own executable,
+	// mirrored into a scratch runtime and booted against this plugin's
+	// `resources/app`. The probe therefore looks for an Electron window process
+	// whose userData points into our scratch directory — an assertion about the
+	// actual product path, not about a script name.
 	const started = await callRoute(routes.get(`${ROUTE}/window`), { body: JSON.stringify({ action: "open", state }) });
 	if (started.payload?.ok === true) {
+		check("the window reports the Electron path", started.payload?.mode === "electron");
 		const listing = spawnSync(
 			"powershell",
-			["-NoProfile", "-Command", "(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'window\\.ps1' } | Measure-Object).Count"],
+			["-NoProfile", "-Command", "(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'sm-window-' -and $_.CommandLine -match '--user-data-dir' } | Measure-Object).Count"],
 			{ encoding: "utf8" },
 		);
 		const count = Number(String(listing.stdout || "0").trim());
-		check("a window process really exists", Number.isFinite(count) && count > 0);
+		check("a real Electron window process exists", Number.isFinite(count) && count > 0);
 		if (!(count > 0)) console.error("process listing said:", String(listing.stdout || "").trim(), String(listing.stderr || "").trim());
+		// The window is only useful if it reached its own first paint.
+		const probe = await callRoute(routes.get(`${ROUTE}/probe`), { method: "GET" });
+		check("the window reported a readiness handshake", probe.payload?.open === true);
 	} else {
 		check("the window request explains its refusal", String(started.payload?.error ?? "").length > 0);
 		console.error("window refused:", String(started.payload?.error ?? ""));

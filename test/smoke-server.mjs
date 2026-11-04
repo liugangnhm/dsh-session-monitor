@@ -1,5 +1,5 @@
 /**
- * One-shot state server for the WPF window smoke test.
+ * One-shot state server used while developing the detached window by hand.
  *
  * It mirrors the real payload, including the settings the window reads beyond
  * the row list: `showAll`/`notifyOn` for the header buttons, `opacity` for the
