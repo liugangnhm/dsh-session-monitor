@@ -8,9 +8,11 @@
  * hidden panel's toast.
  *
  * This drives the real `apply()` against a stub Cordis context, invokes the
- * window route the browser half calls, and asserts the answer is a real
- * outcome: either a started window, or a refusal that explains itself. A
- * TypeError is exactly what must never come back.
+ * routes the browser half calls, and asserts each answer is a real outcome:
+ * either work done, or a refusal that explains itself. A TypeError is exactly
+ * what must never come back. The app-window raise is checked at its process
+ * boundary (no real Electron process is launched here); `raise-e2e.mjs` drives
+ * the real shell for that.
  *
  *   node test/host-check.mjs          # routes and refusal paths only
  *   node test/host-check.mjs --run    # also spawn the real window and close it
@@ -23,41 +25,6 @@ const check = (label, condition) => {
 };
 
 const ROUTE = "/dsh-session-monitor";
-
-/**
- * A PowerShell probe for the throwaway focus window.
- *
- * Kept as the prefix of a `-Command` string so each probe is one short
- * expression; the class is defined once per spawned process.
- */
-const WIN32_PROBE = `
-Add-Type -TypeDefinition @'
-using System;
-using System.Text;
-using System.Runtime.InteropServices;
-public class SmCheck {
-  public delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
-  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lParam);
-  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
-  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
-  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
-  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
-  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int max);
-  public static IntPtr Find(int pid) {
-    IntPtr hit = IntPtr.Zero;
-    EnumWindows(delegate(IntPtr h, IntPtr p) {
-      if (hit != IntPtr.Zero) return true;
-      uint wpid; GetWindowThreadProcessId(h, out wpid);
-      if (wpid != (uint)pid || !IsWindowVisible(h)) return true;
-      StringBuilder c = new StringBuilder(300); GetClassName(h, c, c.Capacity);
-      if (c.ToString().StartsWith("HwndWrapper")) { hit = h; return true; }
-      return true;
-    }, IntPtr.Zero);
-    return hit;
-  }
-}
-'@
-`;
 
 /** Load the host half and capture the routes its apply() registers. */
 async function loadHost() {
@@ -171,6 +138,13 @@ check("every route is an exact registration", registered.every((route) => route.
 const foreign = await callRoute(routes.get(`${ROUTE}/probe`), { method: "GET", host: "example.test" });
 check("a non-loopback caller is refused", foreign.statusCode === 403);
 
+// The probe is how the browser half decides between the desktop raise path and
+// the web fallbacks, so the reported raise mechanism must match reality: this
+// check process is not Electron, so it must NOT claim an Electron raise.
+const probed = await callRoute(routes.get(`${ROUTE}/probe`), { method: "GET" });
+check("the probe answers with JSON", probed.statusCode === 200 && typeof probed.payload === "object");
+check("a non-Electron host declares no Electron raise path", probed.payload?.raise === "none");
+
 const wrongMethod = await callRoute(routes.get(`${ROUTE}/window`), { method: "GET" });
 check("a wrong method on the window route is refused", wrongMethod.statusCode === 405);
 
@@ -243,7 +217,15 @@ await pressTwice(`${ROUTE}/open`, { id: "h-session" });
 check("one row click on both transports queues exactly one open", (await pendingState()).items.length === 1);
 await callRoute(routes.get(`${ROUTE}/consume`), { body: JSON.stringify({ ids: ["h-session"] }) });
 
-// --- the focus route ----------------------------------------------------------
+// --- the raise route ----------------------------------------------------------
+//
+// Raising the app window is delegated to Electron: the Host relaunches the
+// shell, the running instance takes the single-instance lock and runs
+// `restore()/show()/focus()` itself. The old Win32 helper is gone, so what has
+// to be proven here is the hand-off: the child is launched WITHOUT
+// ELECTRON_RUN_AS_NODE (or it would run as Node and never reach Electron), a
+// zero exit means the running instance accepted it, and every refusal explains
+// itself instead of throwing.
 
 const foreignFocus = await callRoute(routes.get(`${ROUTE}/focus`), { method: "POST", host: "example.test" });
 check("a non-loopback focus caller is refused", foreignFocus.statusCode === 403);
@@ -267,6 +249,114 @@ check(
 	"a focus request reports an action or a reason",
 	typeof focused.payload?.action === "string" || typeof focused.payload?.reason === "string",
 );
+
+// The hand-off itself, with the process boundary stubbed so the check owns the
+// timing. Each case pins one property the real launcher needs.
+const { raiseAppWindow } = await import(new URL("../lib/index.js", import.meta.url));
+
+/**
+ * One fake child process: records the two event subscriptions the raise path
+ * makes and can be settled on demand, so no real Electron process is started
+ * by the automated check.
+ * @param outcome - `code`/`signal`/`error`/`stderr` to deliver.
+ * @returns `{ calls, child, spawn }` where `calls` holds every launch.
+ */
+function captureLaunch(outcome = {}) {
+	const calls = [];
+	const listeners = {};
+	const child = {
+		killCalls: 0,
+		kill() {
+			child.killCalls += 1;
+		},
+		stderr: {
+			on(event, listener) {
+				listeners["stderr:" + event] = listener;
+				return child.stderr;
+			},
+		},
+		on(event, listener) {
+			listeners[event] = listener;
+			return child;
+		},
+	};
+	const spawn = (execPath, args, options) => {
+		calls.push({ execPath, args, env: options.env, options });
+		// `settle: false` models a launcher that hangs: it never reports an exit.
+		if (outcome.settle === false) return child;
+		setTimeout(() => {
+			if (outcome.error) {
+				if (listeners.error) listeners.error(outcome.error);
+				return;
+			}
+			if (outcome.stderr && listeners["stderr:data"]) listeners["stderr:data"](outcome.stderr);
+			if (listeners.exit) listeners.exit(outcome.code === undefined ? 0 : outcome.code, outcome.signal ?? null);
+		}, 5);
+		return child;
+	};
+	return { calls, child, spawn };
+}
+
+{
+	// A plain-Node Host (the web profile) has no Electron window to raise.
+	const result = await raiseAppWindow({ electronVersion: undefined, spawn: () => { throw new Error("must not spawn"); } });
+	check("a web-profile host refuses to raise without launching anything", result.ok === false && /no Electron runtime/.test(result.reason));
+}
+
+{
+	const capture = captureLaunch({ code: 0, stderr: "noise about the disk cache\n" });
+	const result = await raiseAppWindow({
+		electronVersion: "44.7.0",
+		platform: "win32",
+		execPath: "C:\\apps\\DeepSeek Harness.exe",
+		env: { PATH: "C:\\bin", ELECTRON_RUN_AS_NODE: "1", ELECTRON_NO_ATTACH_CONSOLE: "1", KEEP: "yes" },
+		spawn: capture.spawn,
+	});
+	check("a desktop raise relaunches the shell exactly once", capture.calls.length === 1);
+	check("the relaunch passes the deep link as its only argument", capture.calls[0]?.args?.length === 1 && capture.calls[0].args[0] === "dsh://open");
+	check(
+		"the relaunch drops ELECTRON_RUN_AS_NODE (or it would run as Node, not Electron)",
+		capture.calls[0]?.env && !("ELECTRON_RUN_AS_NODE" in capture.calls[0].env) && !("ELECTRON_NO_ATTACH_CONSOLE" in capture.calls[0].env),
+	);
+	check("the relaunch keeps the rest of the environment", capture.calls[0]?.env?.KEEP === "yes" && capture.calls[0]?.env?.PATH === "C:\\bin");
+	check("the launcher does not inherit the Host's stdio for output", capture.calls[0]?.options?.stdio?.[0] === "ignore");
+	check("a zero exit is reported as the Electron restore path", result.ok === true && result.action === "electron:restore-show-focus");
+	check("a successful raise does not claim a foreground state it cannot see", !("foreground" in result));
+}
+
+{
+	const capture = captureLaunch({ code: 3, stderr: "boom: no display\n" });
+	const result = await raiseAppWindow({
+		electronVersion: "44.7.0",
+		platform: "win32",
+		execPath: "C:\\apps\\DeepSeek Harness.exe",
+		env: {},
+		spawn: capture.spawn,
+	});
+	check("a failing launcher is reported as a failure", result.ok === false && result.action === "none");
+	check("a failing launcher quotes why it failed", /boom: no display/.test(String(result.reason)));
+}
+
+{
+	// A launcher that never settles. The implementation's deadline is unref'd
+	// (so a shutting-down Host is never held open by it), which means the check
+	// has to keep the loop alive itself while it waits.
+	const capture = captureLaunch({ settle: false });
+	const keepAlive = setInterval(() => {}, 50);
+	const started = Date.now();
+	const result = await raiseAppWindow({
+		electronVersion: "44.7.0",
+		platform: "win32",
+		execPath: "C:\\apps\\DeepSeek Harness.exe",
+		env: {},
+		spawn: capture.spawn,
+		timeoutMs: 120,
+	});
+	clearInterval(keepAlive);
+	check("a hung launcher times out instead of hanging the click", result.ok === false && /did not hand off/.test(String(result.reason)));
+	check("a timed-out launcher is NOT killed (it may have become the app)", capture.child.killCalls === 0);
+	check("the timeout is bounded by the caller's value", Date.now() - started < 3000);
+}
 
 // --- the window request -----------------------------------------------------
 
@@ -304,101 +394,6 @@ if (process.argv.includes("--run") && process.platform === "win32") {
 	}
 	const closed = await callRoute(routes.get(`${ROUTE}/window`), { body: JSON.stringify({ action: "close" }) });
 	check("closing the window is acknowledged", closed.payload?.ok === true && closed.payload?.open === false);
-}
-
-// --- the focus helper, against a throwaway window ------------------------------
-//
-// `lib/focus.ps1` is the one piece of this plugin that drives the OS window
-// manager, and its failure mode is silent (a click that does nothing). So with
-// `--run` it is exercised for real — but never against the user's own DSH
-// window: a temporary WPF window stands in for it, and the assertions are
-// "minimized becomes restored" and "the helper reports what it did".
-if (process.argv.includes("--run") && process.platform === "win32") {
-	const { spawn } = await import("node:child_process");
-	const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
-	const { tmpdir } = await import("node:os");
-	const { join } = await import("node:path");
-	const powershell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
-
-	const work = mkdtempSync(join(tmpdir(), "sm-focus-check-"));
-	const victimScript = join(work, "victim.ps1");
-	writeFileSync(
-		victimScript,
-		"\uFEFF" +
-			[
-				"Add-Type -AssemblyName PresentationFramework",
-				"$w = New-Object System.Windows.Window",
-				'$w.Title = "sm-focus-check victim"',
-				"$w.Width = 300; $w.Height = 180",
-				'$w.WindowStartupLocation = "CenterScreen"',
-				"$w.ShowDialog() | Out-Null",
-			].join("\n"),
-		"utf8",
-	);
-	const victim = spawn(powershell, ["-NoProfile", "-STA", "-File", victimScript], { stdio: "ignore", windowsHide: false });
-
-	/** One Add-Type'd probe, so the check can minimize and inspect the victim. */
-	const probe = (command) =>
-		spawnSync(powershell, ["-NoProfile", "-Command", WIN32_PROBE + command], { encoding: "utf8" });
-
-	const handle = await (async () => {
-		for (let attempt = 0; attempt < 40; attempt += 1) {
-			const found = probe(`[SmCheck]::Find(${victim.pid})`);
-			const text = String(found.stdout || "").trim();
-			if (text !== "" && text !== "0") return text;
-			await new Promise((resolve) => setTimeout(resolve, 150));
-		}
-		return "0";
-	})();
-
-	check("the throwaway window exists to test against", handle !== "0");
-	if (handle !== "0") {
-		probe(`[void][SmCheck]::ShowWindow([IntPtr]${handle}, 6)`);
-		await new Promise((resolve) => setTimeout(resolve, 500));
-		const minimized = String(probe(`[SmCheck]::IsIconic([IntPtr]${handle})`).stdout || "").trim();
-		check("the throwaway window is minimized before the focus run", minimized === "True");
-
-		// The route's own target is this Node process's ancestry, which is not the
-		// victim, so the helper is invoked directly with the victim's pid. The
-		// window class is widened for the victim because the production default
-		// deliberately refuses non-Chromium windows — that refusal is itself the
-		// reason the monitor's own WPF window can never be raised by mistake.
-		const focusScript = new URL("../lib/focus.ps1", import.meta.url).pathname.replace(/^\//, "");
-		const focused = spawnSync(
-			powershell,
-			[
-				"-NoProfile",
-				"-ExecutionPolicy",
-				"Bypass",
-				"-File",
-				focusScript,
-				"-TargetPid",
-				String(victim.pid),
-				"-WindowClass",
-				"HwndWrapper",
-			],
-			{ encoding: "utf8" },
-		);
-		const report = String(focused.stdout || "").trim().split("\n").pop();
-		let parsed = null;
-		try {
-			parsed = JSON.parse(report);
-		} catch {}
-		check("the focus helper reports a JSON outcome", parsed !== null);
-		check("the focus helper succeeded against a real window", parsed?.ok === true);
-		check(
-			"the focus helper restored the minimized window",
-			String(parsed?.action ?? "").startsWith("restored"),
-		);
-		if (parsed === null) console.error("focus helper said:", report, String(focused.stderr || "").slice(0, 300));
-	}
-
-	try {
-		spawnSync("taskkill", ["/pid", String(victim.pid), "/t", "/f"], { stdio: "ignore", windowsHide: true });
-	} catch {}
-	try {
-		rmSync(work, { recursive: true, force: true });
-	} catch {}
 }
 
 if (failures.length > 0) {
