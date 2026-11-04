@@ -160,6 +160,9 @@ const ctx = {
 			return () => {};
 		},
 		bind: () => (key) => key,
+		// The real locale service exposes the active language id; the detached
+		// window needs it because the Host cannot know the app's language.
+		getLocale: () => ({ active: "zh-CN", locales: [], revision: 0 }),
 	},
 	slots: {
 		inject: (key, callback) => {
@@ -490,6 +493,11 @@ globalThis.fetch = (url, options) => {
 detachButton.props.onClick();
 await new Promise((resolve) => setTimeout(resolve, 20));
 check("the host is asked to open the native window once", nativeWindowCalls.length === 1 && nativeWindowCalls[0].action === "open");
+// The window's labels come from the app's ACTIVE language, not from a guess:
+// the Host is a plain-Node child and the desktop shell exports no locale
+// environment variable, so without this the window opened in English for a
+// Chinese user (measured on this machine).
+check("the open request carries the app's active language", nativeWindowCalls[0].language === "zh-CN");
 check("the snapshot rides along with the open request", Array.isArray(nativeWindowCalls[0].state?.rows));
 check("the snapshot is also pushed into the window", nativeStateCalls.length >= 1);
 panel = renderPanel();

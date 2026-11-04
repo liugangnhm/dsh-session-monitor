@@ -34,6 +34,7 @@ dsh-session-monitor/
     test/host-check.mjs         # host 半边：路由、拒绝路径、唤起请求的进程边界（--run 真开窗）
     test/window-shared.test.mjs # 外置窗纯逻辑：状态映射 / 透明度护栏 / 行签名 / 边界夹取
     test/window-e2e.mjs         # 真 Electron 建窗：置顶位、尺寸、存活、不回声
+    test/window-locale.test.mjs # 外置窗语言链路：代码字典 → locale JSON → 窗口字符串表
     test/window-origin.test.mjs # 外置窗轮询地址推导
     test/raise-e2e.mjs          # 真 Electron 第二实例 → restore/show/focus（端到端）
     test/smoke-server.mjs       # 冒烟用的假状态服务器
@@ -52,6 +53,7 @@ dsh-session-monitor/
   - 配置走**文件**（`--config`）而不是命令行：实测 `-- --origin http://…` 会被 Chromium 当成它自己的开关，页面直接 `ERR_FAILED`，窗口永远不出现。
   - 通信沿用原来的回环 HTTP 协议（`/state`、`/pending`、`/consume`、`/command`、`/open`）和 stdout 协议行，所以 host 的去重漏斗与队列一行没改。窗口连续 10 次拉取失败会自闭（host 消失时不留孤儿窗口）。
   - 旧实现是 `child_process.spawn` 一个 PowerShell WPF 窗口（`lib/window.ps1`，303 行，含自绘 ×/滑杆/置顶）。它已删除：控窗 API 用的是 WPF 而不是 Electron，正是用户报的闪屏/无效的来源。
+  - **语言跟随应用设置**：窗口的文字由 host 写进 `strings.json`，而语言 id 只来自浏览器半边的 `ctx.locale.getLocale().active`。host 是纯 Node 子进程，桌面壳**不导出任何 locale 环境变量**（实测 `DSH_LOCALE` / `LANG` 在 Windows 上都是空的），所以早先按环境变量猜的写法会让中文用户的窗口显示英文。窗口按钮的 tooltip 与无障碍名称也走同一张表，不留硬编码英文。
 - **两路传输必须收敛成一次事件**：窗口刻意把每次交互同时发两遍（stdout 协议行 + HTTP POST），这样管道断了也不会让按钮静默失效。两条都会落到 host，所以 host 是唯一能把这一对折回成一次事件的地方——`acceptWindowReport()` 就是这个漏斗，并按「事件种类 + 目标 + 300ms 窗口」去重。**这不是锦上添花**：行点击是幂等的，但**开关类**操作被应用两次就自己抵消，按钮看起来完全没反应（修复前实测：一次 ▼ 点击排出 `["p-1","p-1"]`）。不同的父项、以及用户真正再点一次，都不受影响。
 - **唤起主窗口走 Electron 自己的 API**：`window.focus()` 对另一个 OS 窗口无效（浏览器半边在沙箱 iframe 里），而 host 半边只是 Electron 主进程的 Node 子进程，`require('electron')` 解析不到、也拿不到 `BrowserWindow`。所以这里**不再自己操作窗口**——旧实现的 `focus.ps1` 用 `ShowWindow`/`SetForegroundWindow` 从外部进程抢前台，既受 Windows 前台锁限制（被拒绝时窗口留在原处，“点了没反应”），又会重新声明边框与 z 序（用户看到的闪屏）。
   现在行点击只做一件事：host 半边用**桌面壳自己的可执行文件**再启动一次并带上 `dsh://open`。运行中的实例持有单实例锁，新进程立刻退出，然后运行中的实例执行它本来就会对“第二次启动”执行的那段：
@@ -113,6 +115,7 @@ node test/client.test.mjs         # 浏览器半边离线断言
 node test/host-check.mjs          # host 半边：路由、拒绝路径、唤起请求的进程边界（--run 真开窗）
 node test/window-shared.test.mjs  # 外置窗纯逻辑：状态映射、透明度护栏、行签名、边界夹取
 node test/window-e2e.mjs          # 真 Electron 建窗：置顶位、尺寸、存活、不回声
+node test/window-locale.test.mjs  # 外置窗语言链路（防止窗口退回英文）
 node test/window-origin.test.mjs  # 外置窗轮询地址推导（含沙箱帧 "null" 回归）
 node test/raise-e2e.mjs           # 真 Electron 第二实例 → restore/show/focus（端到端）
 ```
