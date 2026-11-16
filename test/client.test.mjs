@@ -500,6 +500,10 @@ check("the host is asked to open the native window once", nativeWindowCalls.leng
 check("the open request carries the app's active language", nativeWindowCalls[0].language === "zh-CN");
 check("the snapshot rides along with the open request", Array.isArray(nativeWindowCalls[0].state?.rows));
 check("the snapshot is also pushed into the window", nativeStateCalls.length >= 1);
+check(
+	"each pushed snapshot carries a monotonic revision",
+	Number.isInteger(nativeStateCalls[0].state?.revision) && nativeStateCalls[0].state.revision > 0,
+);
 panel = renderPanel();
 const recallButton = collect(panel, "sm-btn", []).find((node) => node.children[0] === "panel.attach");
 check("the panel reports the native window as detached", recallButton !== undefined);
@@ -1024,6 +1028,37 @@ check(
 globalThis.fetch = realFetch;
 globalThis.window.documentPictureInPicture = undefined;
 storage.delete("sm.opacity");
+
+// --- two status stores, one verdict -------------------------------------------
+//
+// `sessions.list` and `uiSession.sessionStatus` update in separate
+// notifications. Whichever arrives second used to make the row jump
+// running→idle→running; the merged rule keeps it live until BOTH agree it
+// stopped.
+listState = {
+	ids: ["s-lag-a", "s-lag-b", "s-lag-c", "s-lag-d"],
+	byId: {
+		"s-lag-a": { id: "s-lag-a", displayTitle: "Catalog ahead", running: true, blank: false, updatedAt: 4 },
+		"s-lag-b": { id: "s-lag-b", displayTitle: "Status undefined", running: true, blank: false, updatedAt: 3 },
+		"s-lag-c": { id: "s-lag-c", displayTitle: "Status ahead", running: false, blank: false, updatedAt: 2 },
+		"s-lag-d": { id: "s-lag-d", displayTitle: "Both stopped", running: false, blank: false, updatedAt: 1 },
+	},
+	phase: "ready",
+	projectionsBySession: {},
+};
+statusState = new Map([
+	["s-lag-a", { running: false, pendingInteraction: undefined, completionUnread: false }],
+	["s-lag-b", { running: undefined, pendingInteraction: undefined, completionUnread: false }],
+	["s-lag-c", { running: true, pendingInteraction: undefined, completionUnread: false }],
+	["s-lag-d", { running: false, pendingInteraction: undefined, completionUnread: false }],
+]);
+for (const listener of listListeners) listener();
+panel = renderPanel();
+rows = collectRows(panel);
+check(
+	"running survives whichever status store lags or omits the fact",
+	JSON.stringify(rows.map(cellState)) === JSON.stringify(["state.running", "state.running", "state.running", "state.idle"]),
+);
 
 // --- report -------------------------------------------------------------------
 

@@ -71,6 +71,8 @@ let snapshot = {
 
 /** Reports the window POSTed, so the protocol lines can be checked. */
 const received = [];
+/** How often the window tried to drain the browser half's queue. */
+let pendingPolls = 0;
 
 const server = createServer((request, response) => {
 	const send = (payload) => {
@@ -79,6 +81,7 @@ const server = createServer((request, response) => {
 	};
 	if (request.method === "GET" && request.url === "/state") return send({ ok: true, ...snapshot });
 	if (request.method === "GET" && request.url === "/pending") {
+		pendingPolls += 1;
 		return send({ ok: true, items: [], commands: [], children: [], opacity: null, open: true });
 	}
 	if (request.method === "POST") {
@@ -143,8 +146,6 @@ writeFileSync(
 	JSON.stringify({
 		origin,
 		statePath: "/state",
-		pendingPath: "/pending",
-		consumePath: "/consume",
 		commandPath: "/command",
 		openPath: "/open",
 		prefs: join(prepared.userData, "window-prefs.json"),
@@ -178,6 +179,12 @@ if (!ready) {
 	console.error("  stdout:", stdout.slice(0, 600));
 	console.error("  stderr:", stderr.slice(0, 900));
 }
+
+// The browser half alone owns `/pending`; a window that polls it races the
+// browser half for the same requests and can swallow row clicks. Let a few
+// polling periods pass before asserting the window never touched it.
+await new Promise((resolve) => setTimeout(resolve, 1600));
+check("the window never drains the browser half's queue", pendingPolls === 0);
 
 // --- what the OS actually has -------------------------------------------------
 

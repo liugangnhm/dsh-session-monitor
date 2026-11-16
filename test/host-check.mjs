@@ -217,6 +217,19 @@ await pressTwice(`${ROUTE}/open`, { id: "h-session" });
 check("one row click on both transports queues exactly one open", (await pendingState()).items.length === 1);
 await callRoute(routes.get(`${ROUTE}/consume`), { body: JSON.stringify({ ids: ["h-session"] }) });
 
+// Clicks made while the browser half is asleep must not replay as a backlog:
+// opening A then B leaves only B, the user's final choice.
+await settle();
+await pressTwice(`${ROUTE}/open`, { id: "h-first" });
+await settle();
+await pressTwice(`${ROUTE}/open`, { id: "h-last" });
+pending = await pendingState();
+check(
+	"a newer row click replaces an undrained older one",
+	JSON.stringify(pending.items) === JSON.stringify(["h-last"]),
+);
+await callRoute(routes.get(`${ROUTE}/consume`), { body: JSON.stringify({ ids: ["h-last"] }) });
+
 // --- the raise route ----------------------------------------------------------
 //
 // Raising the app window is delegated to Electron: the Host relaunches the
@@ -365,6 +378,18 @@ function captureLaunch(outcome = {}) {
 // flag the check asserts the part that broke in production: the route answers
 // JSON, and a refusal explains itself instead of surfacing a TypeError.
 const state = { rows: [{ id: "host-check", title: "主机自检", state: "running", blank: false }], totalCount: 1 };
+
+// Snapshot posts can arrive out of order. A stale revision must not roll the
+// window back to the state the user already left.
+await callRoute(routes.get(`${ROUTE}/state`), {
+	body: JSON.stringify({ state: { ...state, revision: 20, runningCount: 20 } }),
+});
+await callRoute(routes.get(`${ROUTE}/state`), {
+	body: JSON.stringify({ state: { ...state, revision: 19, runningCount: 19 } }),
+});
+const adopted = await callRoute(routes.get(`${ROUTE}/state`), { method: "GET" });
+check("a newer snapshot is adopted", adopted.payload?.runningCount === 20);
+check("an older snapshot cannot overwrite it", adopted.payload?.runningCount !== 19);
 
 // Whether this process could open the real window at all. The window is a real
 // Electron process launched from the desktop shell's executable, and this check

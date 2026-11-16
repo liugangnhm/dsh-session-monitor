@@ -15,7 +15,7 @@ DeepSeek Harness 的轻量**会话状态悬浮面板**：实时列出各会话�
 | 实时更新 | 订阅 Host 的 session 列表与统一状态流（Gateway control stream 推送，非轮询）；DSH 最小化时 renderer 不休眠，事件继续到达并推送进外置窗 |
 | 通知 | 仅在**窗口不可见/未聚焦**时触发：某会话从运行中→完成、或出现待处理交互；每会话每类 60 秒冷却；系统通知不可用时回退应用内 Toast。铃铛按钮开关，记忆选择 |
 | 外置独立窗 | 「外置」按钮按环境逐级回退：① **真 Electron 置顶窗**（桌面版：host 半边用壳自己的 Electron 启动本插件的窗口程序，frameless + 真 `WS_EX_TOPMOST`，不随 DSH 最小化）→ ② Document Picture-in-Picture（web profile / Chrome 系）→ ③ `window.open` 普通独立弹窗 → ④ 应用内悬浮面板。外置窗内点击行同样跳转会话 |
-| 点击跳转 | 点击行（应用内或外置窗）→ `uiWorkspace.openSession(id)` 选中该会话并展示对话；**若 DSH 不在前台，由 host 半边请桌面壳自己把主窗口 `restore → show → focus`**（Electron 原生窗口 API）；已经在前台时不做任何窗口操作 |
+| 点击跳转 | 点击行（应用内或外置窗）→ `uiWorkspace.openSession(id)` 选中该会话并展示对话；**外置窗的行点击先由 host 半边立即请桌面壳 `restore → show → focus`（1.2 秒冷却），不再等待可能被最小化节流的 renderer**；浏览器半边随后切换到该会话。应用内面板保持「已在前台就不做窗口操作」的轻量策略 |
 | 其他 | 面板可拖动（位置记忆）、可收起；host 半边只负责外置窗、唤起主窗口与回环控制路由 |
 
 ## 原理
@@ -40,7 +40,7 @@ dsh-session-monitor/
     test/smoke-server.mjs       # 冒烟用的假状态服务器
 ```
 
-- 数据来自官方 Client 服务：`ctx.sessions.list`（`SessionSummary`：`displayTitle/running/blank/updatedAt`）与可选的 `ctx.uiSession.sessionStatus`（`running/pendingInteraction/completionUnread`，sidebar 行同款状态源；缺失时用列表 running 字段 + 本地完成检测兜底）。
+- 数据来自官方 Client 服务：`ctx.sessions.list`（`SessionSummary`：`displayTitle/running/blank/updatedAt`）与可选的 `ctx.uiSession.sessionStatus`（`running/pendingInteraction/completionUnread`，sidebar 行同款状态源；缺失时用列表 running 字段 + 本地完成检测兜底）。两个投影由不同 store 分两次通知，运行中取**并集**（任一为 `true` 即运行中，只有两边都停下才落到完成/空闲），未读完成则优先落 `done`——这样状态不会因通知到达先后而 running→idle→running 横跳。
 - **子 agent 的来源**：官方 `projectList()` 会把子 agent 写进 `byId`（带 `parentId` 与 `origin: 'subagent'`），但**不一定放进 `ids`**。本插件因此遍历 `byId` 建树，而不是只走 `ids`——这正是子 agent 之前完全不显示的原因。`uiSession.sessionStatus` 的 id 集合本身取自 `byId`，所以子 agent 有完整的运行中/待处理/未读完成状态，不是粗略态。
 - UI 挂在官方扩展点 `shell.overlay`（Frame-wide floating layer），只注册、不替换任何官方组件。
 - 状态点用官方原语 `StateDot`（done/warning/ongoing/error/idle），提示用 `Toast`，配色全部走 `--dsw-alias-*` 主题 token，深/浅色与换肤自动跟随。
@@ -51,10 +51,10 @@ dsh-session-monitor/
   - 必须剔除继承来的 `ELECTRON_RUN_AS_NODE`，否则子进程跑成 Node，永远建不出窗口。
   - 必须给独立的 `--user-data-dir`，否则会和真实应用抢同一个 Chromium 缓存目录。
   - 配置走**文件**（`--config`）而不是命令行：实测 `-- --origin http://…` 会被 Chromium 当成它自己的开关，页面直接 `ERR_FAILED`，窗口永远不出现。
-  - 通信沿用原来的回环 HTTP 协议（`/state`、`/pending`、`/consume`、`/command`、`/open`）和 stdout 协议行，所以 host 的去重漏斗与队列一行没改。窗口连续 10 次拉取失败会自闭（host 消失时不留孤儿窗口）。
+  - 通信沿用原来的回环 HTTP 协议（`/state`、`/pending`、`/consume`、`/command`、`/open`）和 stdout 协议行；但**外置窗只轮询 `/state`**，`/pending` 队列只由浏览器半边消费——此前两边同时拉同一个队列，窗口抢到后会清空并丢弃点击，导致用户要点很多次才偶发生效。窗口连续 10 次拉取失败会自闭（host 消失时不留孤儿窗口）。
   - 旧实现是 `child_process.spawn` 一个 PowerShell WPF 窗口（`lib/window.ps1`，303 行，含自绘 ×/滑杆/置顶）。它已删除：控窗 API 用的是 WPF 而不是 Electron，正是用户报的闪屏/无效的来源。
   - **语言跟随应用设置**：窗口的文字由 host 写进 `strings.json`，而语言 id 只来自浏览器半边的 `ctx.locale.getLocale().active`。host 是纯 Node 子进程，桌面壳**不导出任何 locale 环境变量**（实测 `DSH_LOCALE` / `LANG` 在 Windows 上都是空的），所以早先按环境变量猜的写法会让中文用户的窗口显示英文。窗口按钮的 tooltip 与无障碍名称也走同一张表，不留硬编码英文。
-- **两路传输必须收敛成一次事件**：窗口刻意把每次交互同时发两遍（stdout 协议行 + HTTP POST），这样管道断了也不会让按钮静默失效。两条都会落到 host，所以 host 是唯一能把这一对折回成一次事件的地方——`acceptWindowReport()` 就是这个漏斗，并按「事件种类 + 目标 + 300ms 窗口」去重。**这不是锦上添花**：行点击是幂等的，但**开关类**操作被应用两次就自己抵消，按钮看起来完全没反应（修复前实测：一次 ▼ 点击排出 `["p-1","p-1"]`）。不同的父项、以及用户真正再点一次，都不受影响。
+- **两路传输必须收敛成一次事件**：窗口刻意把每次交互同时发两遍（stdout 协议行 + HTTP POST），这样管道断了也不会让按钮静默失效。两条都会落到 host，所以 host 是唯一能把这一对折回成一次事件的地方——`acceptWindowReport()` 就是这个漏斗，并按「事件种类 + 目标 + 300ms 窗口」去重。**这不是锦上添花**：行点击是幂等的，但**开关类**操作被应用两次就自己抵消，按钮看起来完全没反应（修复前实测：一次 ▼ 点击排出 `["p-1","p-1"]`）。不同的父项、以及用户真正再点一次，都不受影响。`open` 队列还做了 **latest-wins**：浏览器半边被最小化卡住时连点多个会话，只保留最后一次选择，避免回放旧点击造成「选中的会话又跳回去」。
 - **唤起主窗口走 Electron 自己的 API**：`window.focus()` 对另一个 OS 窗口无效（浏览器半边在沙箱 iframe 里），而 host 半边只是 Electron 主进程的 Node 子进程，`require('electron')` 解析不到、也拿不到 `BrowserWindow`。所以这里**不再自己操作窗口**——旧实现的 `focus.ps1` 用 `ShowWindow`/`SetForegroundWindow` 从外部进程抢前台，既受 Windows 前台锁限制（被拒绝时窗口留在原处，“点了没反应”），又会重新声明边框与 z 序（用户看到的闪屏）。
   现在行点击只做一件事：host 半边用**桌面壳自己的可执行文件**再启动一次并带上 `dsh://open`。运行中的实例持有单实例锁，新进程立刻退出，然后运行中的实例执行它本来就会对“第二次启动”执行的那段：
   `if (window.isMinimized()) window.restore(); window.show(); window.focus();`
@@ -121,9 +121,9 @@ node test/raise-e2e.mjs           # 真 Electron 第二实例 → restore/show/f
 ```
 
 - `client.test.mjs`：以与 `@deepseek-ai/dsh-client-modules` 相同的方式载入 `lib/client.js`（捕获 `window.__ModuleLoader__.load`、桩 React/原语/ctx），断言注册位置与字典、行状态映射与排序、活跃/全部过滤、点击跳转、面板默认隐藏与侧边栏入口、外置失败诊断 toast、快照推送与队列消费，以及离开时的通知触发。另含几组新断言：**子 agent 只出现在 `byId` 时也能进面板**（含缩进、独立状态、折叠记忆与「折叠的空闲父项不被活跃过滤误删」）、**被折叠藏起来的子 agent 完成时照样通知**、**透明度可调/被夹取/下次启动恢复**（用真会读写的存储桩 + 真正重启实例，而不是只重渲染）、**行点击的唤起请求会按焦点状态决定发不发**（已在前台时不发，避免无谓地再启动一次应用；隐藏文档或无法报告焦点的环境一律发，宁多一次请求也不漏拉窗口），以及 **PiP 窗口与面板拿的是同一个透明度、同样渲染子 agent 缩进**（PiP 是另一套 DOM 渲染路径，最容易悄悄掉队）。还守住 `locale/*.json` 与代码字典逐键一致（这条检查当年就发现了一个从未被引用的死键）。
-- `host-check.mjs`：用桩 Cordis 上下文驱动真实 `apply()`，断言八条路由注册、非回环调用被拒、错误方法/畸形请求体返回 4xx，并守住一条真实事故——`windowWorkDirectory()` 把变量当函数调，导致每次开窗都 400、窗口永不出现（`--run` 时真开窗并核对进程存在）。另有**两路传输去重**一组：把同一次交互按窗口的做法发两遍，断言只排进一次、排空后队列干净、用户再点一次仍然生效、不同父项互不掩盖——这条守住的正是「开关被应用两次 → 按钮看起来完全没反应」。唤起主窗口那组则在**进程边界**上断言：只启动一次、参数只有 `dsh://open`、**必须剔掉 `ELECTRON_RUN_AS_NODE`**（否则子进程跑成 Node，永远到不了 Electron）、零退出即 Electron 路径、非零退出带原因、超时**不杀进程**（那可能是刚成为应用的自己）。
+- `host-check.mjs`：用桩 Cordis 上下文驱动真实 `apply()`，断言八条路由注册、非回环调用被拒、错误方法/畸形请求体返回 4xx，并守住一条真实事故——`windowWorkDirectory()` 把变量当函数调，导致每次开窗都 400、窗口永不出现（`--run` 时真开窗并核对进程存在）。新增 **open 队列 latest-wins** 与 **状态快照 revision 单调性** 断言：后一次点击覆盖未消费的前一次；revision 20 之后再来 revision 19 不会把窗口状态倒退。另有**两路传输去重**一组：把同一次交互按窗口的做法发两遍，断言只排进一次、排空后队列干净、用户再点一次仍然生效、不同父项互不掩盖——这条守住的正是「开关被应用两次 → 按钮看起来完全没反应」。唤起主窗口那组则在**进程边界**上断言：只启动一次、参数只有 `dsh://open`、**必须剔掉 `ELECTRON_RUN_AS_NODE`**（否则子进程跑成 Node，永远到不了 Electron）、零退出即 Electron 路径、非零退出带原因、超时**不杀进程**（那可能是刚成为应用的自己）。
 - `window-shared.test.mjs`：外置窗的纯逻辑（`lib/window/shared.js`，被主进程、渲染层和测试三方共用）。这些规则以前埋 PowerShell 里，只能靠真开窗验证。守住的每条都对应一个用户能看见的缺陷：**状态映射**（未知状态必须退到 idle，否则整行渲染抛异常 → 空白窗）、**透明度护栏**（用户刚拖完滑杆时，host 推回的旧值不许把滑杆拽回去，4 秒后自动解除）、**行签名**（快照没变就不重建列表；状态/层级/子 agent 数/折叠/过滤任一变化才重建——这是不闪屏的核心）、**边界夹取**（上次的窗口位置可能落在已拔掉的显示器上，也不能小到无法抓取）。
-- `window-e2e.mjs`：**真开一个 Electron 窗口**（壳的运行时 + 本插件 `lib/window`，与生产同一条路径），然后从 **Win32 侧**读回事实：窗口存在、可见、`WS_EX_TOPMOST` 真的置位、标题非空、尺寸不小于最小值。后面还守着两个真实回归：窗口不能在 `ready` 之后自杀（曾把 host 的 `open` 标志当成"该退出了"，而那个标志要等 host 读完 `ready` 行才为真），以及不能每秒重复上报同一个透明度（两半曾因此无限对打）。
+- `window-e2e.mjs`：**真开一个 Electron 窗口**（壳的运行时 + 本插件 `lib/window`，与生产同一条路径），然后从 **Win32 侧**读回事实：窗口存在、可见、`WS_EX_TOPMOST` 真的置位、标题非空、尺寸不小于最小值。新增断言 **窗口从不请求 `/pending`**，防止它再和浏览器半边抢队列。后面还守着两个真实回归：窗口不能在 `ready` 之后自杀（曾把 host 的 `open` 标志当成"该退出了"，而那个标志要等 host 读完 `ready` 行才为真），以及不能每秒重复上报同一个透明度（两半曾因此无限对打）。
 - `window-origin.test.mjs`：锁住「沙箱帧报 `null` 时必须回退到请求 Host 头」——不然窗口会去拉 `null/...`，十次失败后被孤儿守卫关掉。
 - `raise-e2e.mjs`：用**真的 Electron**（硬链接一份已安装的运行时到临时目录，绝不碰用户的 DSH 窗口）启动一个实现了同样 `second-instance` 处理的宿主，把自己的窗口最小化，然后调用生产代码里的 `raiseAppWindow()`。断言：运行中的实例收到唤起、`restore()` 让 `isMinimized()` 变回 false、`show()` 让窗口可见。聚焦由 Windows 前台策略决定，只作为诊断信息打印、不当硬断言。它还故意把 `ELECTRON_RUN_AS_NODE=1` 原样传进去——这正是生产路径上最容易犯的错，**如果实现没有剔掉这个变量，子进程会跑成 Node，整个检查会以「窗口仍然最小化」失败**。
 
