@@ -558,6 +558,41 @@ globalThis.fetch = realFetch;
 	globalThis.fetch = realFetch;
 }
 
+// A renderer reload drops the in-memory `nativeWindow` flag while the detached
+// window is still alive. Without re-adopting it the window keeps queueing
+// clicks that nobody drains; this reproduces that exact state.
+{
+	const pending = ["reloaded-session"];
+	const windowCalls = [];
+	globalThis.fetch = (url, options) => {
+		const target = String(url);
+		const body = options && options.body ? JSON.parse(options.body) : {};
+		if (target.endsWith("/dsh-session-monitor/probe")) {
+			return Promise.resolve({ json: () => Promise.resolve({ ok: true, desktop: true, window: "electron", raise: "electron" }) });
+		}
+		if (target.endsWith("/dsh-session-monitor/state")) {
+			return Promise.resolve({ json: () => Promise.resolve({ ok: true, open: true }) });
+		}
+		if (target.endsWith("/dsh-session-monitor/pending")) {
+			return Promise.resolve({ json: () => Promise.resolve({ ok: true, open: true, items: pending }) });
+		}
+		if (target.endsWith("/dsh-session-monitor/consume")) {
+			pending.length = 0;
+			return Promise.resolve({ json: () => Promise.resolve({ ok: true }) });
+		}
+		if (target.endsWith("/dsh-session-monitor/window")) {
+			windowCalls.push(body);
+			return Promise.resolve({ json: () => Promise.resolve({ ok: true, open: true }) });
+		}
+		return Promise.reject(new Error("unexpected fetch " + target));
+	};
+	bootFresh();
+	await new Promise((resolve) => setTimeout(resolve, 900));
+	check("a reloaded renderer re-adopts the already-running window", windowCalls.length === 0 && openSessionCalls.includes("reloaded-session"));
+	check("the re-adopted window's queued click is drained", pending.length === 0);
+	globalThis.fetch = realFetch;
+}
+
 // --- sub-agents: hierarchy, per-child state, and collapsing ---------------------
 
 // The host's projection writes sub-agents into `byId` and often leaves them OUT
@@ -1059,6 +1094,28 @@ check(
 	"running survives whichever status store lags or omits the fact",
 	JSON.stringify(rows.map(cellState)) === JSON.stringify(["state.running", "state.running", "state.running", "state.idle"]),
 );
+
+// Both stores can briefly report stopped between two frames while the next
+// status event is still in flight. The row must not blink to idle/done for one
+// frame; the 1.5s hold covers that hand-off.
+listState = {
+	ids: ["s-hold"],
+	byId: { "s-hold": { id: "s-hold", displayTitle: "Hold", running: true, blank: false, updatedAt: 1 } },
+	phase: "ready",
+	projectionsBySession: {},
+};
+statusState = new Map([["s-hold", { running: true, pendingInteraction: undefined, completionUnread: false }]]);
+for (const listener of listListeners) listener();
+listState = {
+	ids: ["s-hold"],
+	byId: { "s-hold": { id: "s-hold", displayTitle: "Hold", running: false, blank: false, updatedAt: 1 } },
+	phase: "ready",
+	projectionsBySession: {},
+};
+statusState = new Map([["s-hold", { running: false, pendingInteraction: undefined, completionUnread: false }]]);
+for (const listener of listListeners) listener();
+rows = collectRows(renderPanel());
+check("a one-frame dual-stop is held in running instead of blinking", cellState(rows[0]) === "state.running");
 
 // --- report -------------------------------------------------------------------
 

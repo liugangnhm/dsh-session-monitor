@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-monitor",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "A lightweight session-status HUD for DeepSeek Harness: lists live sessions with color-coded state (running / awaiting you / done / idle), updates in real time, notifies when a session finishes or needs attention, and can detach into an OS-level always-on-top window that survives minimizing the DSH app. Clicking a row jumps to that session's conversation. · 轻量会话状态悬浮面板：实时列出各会话并以颜色区分状态（运行中/待处理/已完成/空闲），必要时系统通知，可外置为不随 DSH 最小化的置顶小窗，点击行跳转对应会话。",
   "type": "module",

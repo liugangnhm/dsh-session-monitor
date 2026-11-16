@@ -265,7 +265,7 @@ check(
 
 // The hand-off itself, with the process boundary stubbed so the check owns the
 // timing. Each case pins one property the real launcher needs.
-const { raiseAppWindow } = await import(new URL("../lib/index.js", import.meta.url));
+const { raiseAppWindow, focusAppWindow } = await import(new URL("../lib/index.js", import.meta.url));
 
 /**
  * One fake child process: records the two event subscriptions the raise path
@@ -288,6 +288,12 @@ function captureLaunch(outcome = {}) {
 				return child.stderr;
 			},
 		},
+		stdout: {
+			on(event, listener) {
+				listeners["stdout:" + event] = listener;
+				return child.stdout;
+			},
+		},
 		on(event, listener) {
 			listeners[event] = listener;
 			return child;
@@ -302,6 +308,7 @@ function captureLaunch(outcome = {}) {
 				if (listeners.error) listeners.error(outcome.error);
 				return;
 			}
+			if (outcome.stdout && listeners["stdout:data"]) listeners["stdout:data"](outcome.stdout);
 			if (outcome.stderr && listeners["stderr:data"]) listeners["stderr:data"](outcome.stderr);
 			if (listeners.exit) listeners.exit(outcome.code === undefined ? 0 : outcome.code, outcome.signal ?? null);
 		}, 5);
@@ -369,6 +376,31 @@ function captureLaunch(outcome = {}) {
 	check("a hung launcher times out instead of hanging the click", result.ok === false && /did not hand off/.test(String(result.reason)));
 	check("a timed-out launcher is NOT killed (it may have become the app)", capture.child.killCalls === 0);
 	check("the timeout is bounded by the caller's value", Date.now() - started < 3000);
+}
+
+{
+	// The second stage: a Win32 helper claims the real foreground. The helper
+	// is a separate PowerShell process, so the spawn boundary is stubbed the
+	// same way as the shell hand-off above.
+	const capture = captureLaunch({
+		code: 0,
+		stdout: '{"ok":true,"action":"focus:attach-thread","pid":68920,"title":"DSH","foreground":true}\n',
+	});
+	const result = await focusAppWindow({ platform: "win32", spawn: capture.spawn });
+	check("the foreground helper runs exactly once", capture.calls.length === 1);
+	check("the foreground helper invokes PowerShell with the shipped script", capture.calls[0]?.execPath === "powershell.exe" && capture.calls[0]?.args?.includes("-File"));
+	check("the foreground helper reports the raised window", result.ok === true && result.foreground === true && result.pid === 68920);
+}
+
+{
+	const capture = captureLaunch({ code: 0, stdout: '{"ok":false,"action":"none","reason":"no app window"}\n' });
+	const result = await focusAppWindow({ platform: "win32", spawn: capture.spawn });
+	check("a helper that finds no window reports a reason", result.ok === false && /no app window/.test(String(result.reason)));
+}
+
+{
+	const result = await focusAppWindow({ platform: "linux", spawn: () => { throw new Error("must not spawn"); } });
+	check("the foreground helper is a Windows-only fallback", result.ok === false && /Windows-only/.test(String(result.reason)));
 }
 
 // --- the window request -----------------------------------------------------
